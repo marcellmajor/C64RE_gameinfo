@@ -1,0 +1,311 @@
+===============================================================================
+  C64 GAME REVERSE-ENGINEERING SUMMARY (OGhidra AI Analysis)
+===============================================================================
+  Models used: gemma4:e4b, grok-4-1-fast-reasoning
+  Subject: Commodore 64 shooter game binary
+===============================================================================
+
+GAME OVERVIEW
+  Platform:    Commodore 64 (6502 CPU)
+  Genre:       Shooter (player at bottom, enemies at top)
+  Code range:  $0073–$20ED (self-contained, runs in RAM)
+  Screen RAM used as game state — no separate enemy arrays
+
+-------------------------------------------------------------------------------
+MEMORY MAP — KEY VARIABLES (Zero Page)
+-------------------------------------------------------------------------------
+  $39/$3A   Screen pointer (enemy rendering/scanning)
+  $3B       Enemy count (from screen scan; 0 = level clear)
+  $53-$55   Score (BCD format)
+  $56       Joystick poll timer (init $80, ~128 frames)
+  $57/$58   Bullet pointer / active flag
+  $5A       Vulture vertical direction (signed; $02=down)
+  $5B       Vulture horizontal direction (signed; $02=right, $FE=left)
+  $5C       Vulture frame timer
+  $5D       Enemy scan frame timer
+  $5E/$5F   Vulture H-step timer / reload
+  $60       Vulture spawn countdown
+  $61       Vulture bullet timer (init $35)
+  $63       Vulture top-Y bounce limit
+  $64/$65   Vulture V-step timer / reload
+  $66       Sound pitch accumulator (pseudo-RNG seed)
+  $8B       Lives counter (init 3)
+  $8C       Level counter
+
+HARDWARE REGISTERS USED
+  $D000/$D001  Player sprite (Sprite 0) X/Y
+  $D008/$D009  Vulture sprite (Sprite 4) X/Y
+  $D00A/$D00B  Vulture bullet sprite (Sprite 5) X/Y
+  $D012        Raster line (used as pseudo-random source)
+  $D015        Sprite enable register
+  $D01E/$D01F  Sprite collision flags
+  $D020/$D021  Border/background color
+  $D400+       SID sound registers
+  $DC00        CIA#1 Port A — Joystick Port 2
+
+SCREEN RAM LAYOUT
+  $0400+       Screen characters (40 cols × 25 rows)
+  $04EC        Lives digit display (upper-right, row 4 col 12)
+  $D8EC        Lives digit color
+
+-------------------------------------------------------------------------------
+ROUTINES — QUICK REFERENCE
+-------------------------------------------------------------------------------
+  $0073       BCD/digit conversion for score/lives rendering
+  $0900       Game initialization (lives=3, score=0, sprites, charset)
+  $09B8       Clear screen ($0400–$07FF → $20), set colors to $F1
+  $09E0       Draw initial enemy rows (6 + 7 enemies in 2 rows)
+  $0ABD       Render single sleeping enemy (2×2 chars: $40,$41,$42,$43)
+  $0C4A/$0C64 Score rendering (BCD unpack → ASCII)
+  $0C7A       Score/state calculation helper (4× ROR A + AND #$0F)
+  $0C8D       Main game loop (infinite; polls input, updates all)
+  $0CBD       Joystick handler (timer-gated, reads $DC00)
+  $0D17       Enemy scan + movement (scans screen for $40 chars)
+  $0D8F       Bullet movement + collision detection
+  $0E3F       Vulture spawn logic
+  $0EDF       Vulture movement, bullet drop, player grab
+  $101D       Flip vulture H-direction ($5B EOR #$FF)
+  $1024       Flip vulture V-direction ($5A EOR #$FF)
+  $102B       Vulture bullet update (descends each frame)
+  $1052       Player death handler (collision → anim → DEC lives)
+  $113E       DEC $8B (lives--); if 0 → game over
+  $1148       Level clear routine (inc $8C, reset, next stage)
+  $143A       Render lives display ($8B → ASCII at $04EC)
+  $1313/$1392 Sound drivers (also increment $66 pseudo-RNG)
+  $1657       Input init (calls KERNAL $FFE4 GETIN, $FF9F)
+  $2000       Copy screen data
+  $20C5       Title screen — fire to start game (→ JMP $0907)
+
+-------------------------------------------------------------------------------
+MAIN GAME LOOP ($0C8D)
+-------------------------------------------------------------------------------
+  1. Reset stack
+  2. JSR $0CBD  — poll joystick (move player, fire bullet)
+  3. JSR $0D17  — scan screen for enemies, move them, count into $3B
+  4. Check $3B: if 0 → JMP $1148 (level clear)
+  5. JSR $0D8F  — move bullet, check collision with enemies
+  6. JSR $0E3F  — spawn vulture if timer expired
+  7. JSR $0EDF  — move vulture, drop bullet, check player grab
+  8. Handle raster sync, sound updates
+  9. JMP $0C8D  — loop forever
+
+-------------------------------------------------------------------------------
+JOYSTICK INPUT ($0CBD–$0D16)
+-------------------------------------------------------------------------------
+  Poll rate:  Every ~128 frames (timer $56)
+  Read:       $DC00 (CIA#1 Port A, active-low)
+  Horizontal: AND #$0C → $04 = right (INC $D000 ×2), $08 = left (DEC $D000, clamp >$2B)
+  Fire:       AND #$70 == $60 → set bullet active ($58=7), bullet start Y ($57)
+  Cooldown:   $58 must be 0 to fire again
+  Title:      Same fire check at $20C5 → JMP $0907 (start game)
+
+-------------------------------------------------------------------------------
+SLEEPING ENEMIES
+-------------------------------------------------------------------------------
+  Rendering:  2×2 character block ($40/$41 top, $42/$43 bottom)
+  Init:       $09E0 draws Row 1 (6 enemies at $040B+) and Row 2 (7 at $0459+)
+  Movement:   $0D17 scans screen $0406–$04FF for $40 chars;
+              uses raster line ($D012) as pseudo-random to decide left/right;
+              checks adjacent space is empty ($20) before shifting
+  Key design: Screen RAM IS the game state — no separate enemy tracking
+
+SHOOTING ENEMIES ($0D8F collision)
+  Bullet moves upward via pointer $57/$58
+  On hit:  Checks for $42 or $43 at bullet position
+  Align:   Adjusts pointer to top-left ($40) of 2×2 block
+  Explode: Cycles chars 0–$20 across all 4 tiles (flicker effect)
+  Remove:  Final char = $20 (space) → enemy gone from screen AND game logic
+  Score:   BCD increment $54, then JSR $0C64 to update display
+  Sound:   JSR $1320 + $13A5
+
+LEVEL CLEAR DETECTION
+  $0D17 counts $40 chars into $3B
+  Main loop checks: $3B == 0 → JMP $1148 (level clear)
+  $1148: INC $8C (level), play sounds, flash screen, reinit next stage
+
+-------------------------------------------------------------------------------
+VULTURE ENEMY (Sprite 4)
+-------------------------------------------------------------------------------
+  Spawn ($0E3F):
+    Timer $60 expires → pick spawn from screen $40 marker
+    Position Sprite 4 at X=4, Y=$30 (top-left)
+    Direction: $5A=$02 (down), $5B based on player position
+    Enable Sprite 4 ($D015 |= $10)
+
+  Movement ($0EDF):
+    Vertical:  $5A >= 0 → descend (INC $D009), flip at Y=$E0
+               $5A < 0  → ascend (DEC $D009), flip at Y=$63
+    Horizontal: $5B >= 0 → right (INC $D008), flip at edge
+                $5B < 0  → left (DEC $D008), clamp at X=$18
+    Re-targets player X periodically (timer $5E/$5F)
+
+  Bullet drop (Sprite 5):
+    Condition: Vulture Y < $A0, VultureX == PlayerX, no active bullet
+    Set bullet at vulture pos + 19px down, enable Sprite 5
+    Update at $102B: bullet descends each frame until offscreen
+
+  Player grab:
+    $D01F bit 4 (Sprite 0 vs Sprite 4 collision) → death sequence
+    Sound effects, screen flash, disable sprites, BCD score update
+    Flows to $113E: DEC $8B (lives--)
+
+-------------------------------------------------------------------------------
+LIVES SYSTEM
+-------------------------------------------------------------------------------
+  Storage:   $8B (zero page), initialized to 3
+  Display:   $143A renders at screen $04EC (upper-right area)
+             Value converted: ($8B - 1) + $30 → ASCII digit
+             (shows "reserve lives", so 3 lives displays as '2')
+  Death:     $1052 handler → animation → $113E: DEC $8B
+             If $8B == 0 → game over (restart init)
+             Else → JMP $0A4F (respawn, continue level)
+  Single decrement per death confirmed — no other writes to $8B
+
+-------------------------------------------------------------------------------
+PSEUDO-RANDOM NUMBER GENERATION
+-------------------------------------------------------------------------------
+  No dedicated PRNG routine found.
+  Two sources of "randomness":
+    1. $66 — sound pitch accumulator, incremented in sound routines
+       ($1313 every 10 frames, $1392 every 3 frames); feeds SID registers
+    2. $D012 — VIC-II raster line register, sampled in enemy movement
+       ($0D17: AND #$0F, CMP #$08 → 50/50 left/right decision)
+  Note: gemma4 identified $0C7A (4× ROR A) as PRNG, but grok-4 analysis
+  shows this is score/display logic, not a random generator.
+
+-------------------------------------------------------------------------------
+ROM USAGE
+-------------------------------------------------------------------------------
+  BASIC ROM ($A000–$BFFF): DISABLED at $0947 (AND #$FB on $01). No calls.
+  KERNAL ROM ($E000–$FFFF): Two calls only:
+    $FFE4 — GETIN (keyboard input, title screen)
+    $FF9F — scan/IRQ setup
+  Game is almost entirely self-contained in low RAM.
+
+-------------------------------------------------------------------------------
+GHIDRA ANNOTATIONS APPLIED
+-------------------------------------------------------------------------------
+  Functions renamed:
+    $0900 → game_initialization       $0CBD → handle_joystick_input
+    $09B8 → clear_screen_and_setup    $0D17 → update_sleeping_enemies
+    $0D8F → handle_bullet_movement    $0E3F → spawn_vulture
+    $0EDF → update_vulture_movement   $102B → update_player_bullet
+    $143A → render_lives              $2000 → copy_screen_data
+    $0C8D → main_game_loop            $0ABD → render_sleeping_enemy
+
+  Comments set at all major routines and zero-page variables.
+  All listed addresses disassembled in Ghidra code browser.
+
+===============================================================================
+  MODELS DISAGREEMENT NOTE
+===============================================================================
+  gemma4 identified $D009 as the lives counter and $0C7A as PRNG.
+  grok-4 identified $8B as lives and found no true PRNG (only $66/$D012).
+  grok-4's analysis appears more thorough and consistent with C64 hardware:
+    - $D009 is VIC-II Sprite 4 Y-position, not a lives variable
+    - $0C7A is score/display math, not random number generation
+  The grok-4 findings were used for all subsequent analysis steps.
+===============================================================================
+
+
+
+---
+  Sound & Music: Dynamically Generated by Code
+
+  There are no preloaded note sequences or music data tables in this dump. Everything is computed live.
+
+  $1320 — Sound Effect Engine
+
+  $1320: STA $D401    ; Voice 1 freq hi  ← caller passes pitch in A
+  $1326: STA $D400    ; Voice 1 freq lo  = $00 (hardcoded)
+  $132B: STA $D405    ; Attack/Decay     = $22
+  $1330: STA $D406    ; Sustain/Release  = $F1
+  $1335: STA $D404    ; Control reg      = $21 → triangle wave, gate ON
+  $133A: STA $D418    ; Master volume    = $0F (max)
+  A minimal one-shot sound effect: hardcoded envelope and waveform, only the frequency hi byte varies. Called by passing a pitch value in A.
+
+  ---
+  $1392 — Background "Music" Engine
+
+  $1392: DEC $67          ; tempo counter (divisor = 3)
+         BEQ advance
+         RTS
+
+  advance:
+  $1397: LDA #$03
+         STA $67          ; reset tempo
+  $139B: INC $66          ; increment pitch counter
+  $139D: LDA $66
+  $139F: BMI $13A5        ; if $66 ≥ $80, use directly
+  $13A1: LDA #$80
+  $13A3: STA $66          ; if wrapped below $80, reset to $80
+  $13A5: STA $D408        ; → Voice 2 freq hi
+  Every 3 calls, it increments ZP $66 and writes it directly to $D408 (SID Voice 2 frequency high byte). It cycles $80→$FF then wraps back — producing a simple rising pitch sweep that loops. No lookup table, no note
+  data — pure arithmetic.
+
+  ---
+  IRQ vector ($0314) = $EA31
+
+  That's the default KERNAL IRQ — the game never installs a custom IRQ music driver. No raster or CIA-timed music player exists.
+
+  ---
+  Summary
+
+  ┌───────────────────┬─────────────────────────────────────────────────────────────────────────┐
+  │      Feature      │                                 Method                                  │
+  ├───────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │ Sound effects     │ Direct SID writes in $1320, pitch passed as argument                    │
+  ├───────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │ Background sound  │ Algorithmic pitch sweep in $1392, counter $66 incremented each 3 frames │
+  ├───────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │ Music data tables │ None                                                                    │
+  ├───────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │ IRQ music player  │ None — default KERNAL IRQ                                               │
+  └───────────────────┴─────────────────────────────────────────────────────────────────────────┘
+
+  This is typical of a very early 1983 C64 title — before composers like Rob Hubbard and Martin Galway popularized data-driven SID music engines. Vultures uses the SID as a simple beeper, not as a musical instrument.
+
+Now I have everything I need. Key findings confirmed:
+  - Software sprites: 7 custom chars at $0980 (copied to charset at runtime), making a 2×2 vulture bird + egg/bomb drops
+  - Charset $3000: entirely wall-tile 00 FF FF FF FF 00 at title screen (not yet overwritten)
+  - Hardware sprites are disabled ($D015=0) — sprite pointers are garbage defaults
+
+
+---
+  vultures_viewer.py — What it shows
+
+  SOFTWARE SPRITES (the good stuff)
+
+  The vulture bird renders cleanly as a 16×16 pixel, 2×2 char block:
+    ┌────────────────┐
+    │       ██       │   ← head
+    │      ████      │
+    │      ████      │
+    │  ███  ██  ███  │   ← wings
+    │ █████    █████ │
+    │ ██████████████ │   ← body
+    │ █ ██████████ █ │
+    │   █ ██████ █   │
+    │     █ ██ ██    │   ← legs
+    │    ██    ██    │
+    └────────────────┘
+  Chars $45/$46 are the egg-drop projectiles (two mirrored oval frames). Char $44 is a brick/blast tile.
+
+  CHARSET
+
+  19 unique patterns out of 256 — all variations of the same 00 FF FF FF FF 00 00 wall tile with single stray pixels (corner/edge variants). The charset is a pure tilemap engine.
+
+  HARDWARE SPRITES
+
+  None found at title-screen dump time ($D015=0, pointers are defaults). The game uses software sprites exclusively — the 4 bird chars and 2 egg chars are hot-swapped into the charset at runtime.
+
+  SCREEN RENDER
+
+  320 chars wide (40 chars × 8 pixels) — shows the title screen border of wall tiles with open space inside. You'll need a wide terminal or pipe through less -S to view it without line-wrap.
+
+  Usage:
+  python3 vultures_viewer.py                         # uses vultures_loaded.bin in CWD
+  python3 vultures_viewer.py path/to/other.bin       # explicit path
+  python3 vultures_viewer.py 2>&1 | less -S          # wide terminal pager
+
+  

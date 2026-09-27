@@ -1,0 +1,945 @@
+CAPTAIN BLOOD (COMMODORE 64)
+VALIDATED MEMORY, ROUTINES, CONVERSATION AND QUEST REFERENCE
+Prepared 2026-09-27
+
+1. SCOPE AND HOW TO READ THIS REFERENCE
+======================================
+
+This reference consolidates the local reverse-engineering notes with the
+corrections in validation_report.md. It describes the program image in
+memdump_dir/landed_blood.bin and the alien conversation script loaded in that
+image. It is not a complete reconstruction of every quest in the game.
+
+Evidence labels:
+  [CODE]   Supported by saved machine code or data.
+  [EXEC]   Also exercised using the saved code in an isolated 6502 emulator.
+  [INFER] Gameplay meaning inferred from code; exact UI action unconfirmed.
+  [STORY] Interpretation of what the alien dialogue says.
+  [OPEN]  Not established by the available evidence.
+
+Unless otherwise marked, the technical tables describe [CODE] findings.
+The characters are called "aliens" here: some are friendly or ask for help,
+while others threaten Blood. They are not uniformly enemies.
+
+All $-prefixed addresses and values are hexadecimal. Unprefixed planet indices,
+word IDs, flag numbers, dimensions and coordinates are decimal. Planet indices
+are zero-based: planet 0 is the first entry in the game's 64-entry tables.
+An internal planet index is not necessarily its spoken name or number.
+
+The saved image has the ship on planet 0 at (145,69), with alien file 0 loaded.
+File 0 serves planet/alien indices 0-3. Coordinates shown later are specific to
+this saved game; new-game code generates the coordinate tables again.
+
+Validation basis:
+  - 65,536-byte RAM image.
+  - Decoder output reproduced exactly.
+  - 256 script records: 187 patterns, 39 actions, 30 conditions.
+  - 1,247 matcher probes across all 187 patterns passed.
+  - Both password mechanisms and all four coordinate replies were exercised.
+  - A read-only VICE check of $4C00-$4DFF matched the saved image exactly.
+
+The CPU probes used a private memory copy. They bypassed SID entropy collection
+and player-row graphics and did not emulate interrupts or the full user
+interface. They confirm interpreter behavior under the specified state, not a
+complete unmodified VICE playthrough.
+
+
+2. MACHINE CONFIGURATION AND MEMORY REGIONS
+===========================================
+
+2.1 CPU/VIC configuration in the saved conversation screen
+
+  $0001 = $35   BASIC and KERNAL ROM are banked out; I/O remains visible.
+                $A000-$BFFF and $E000-$FFFF are RAM in this configuration.
+  $DD00 = $94   Selects VIC bank at $C000.
+  $D018 = $09   Screen matrix at $C000; bitmap at $E000.
+
+  $C000-$C3E7  Visible screen matrix.
+  $C3F8-$C3FF  Sprite pointers.
+  $D800        Start of color RAM.
+  $E000-$FF3F  8,000-byte bitmap.
+
+Hardware vector contents in this image:
+  $FFFA/$FFFB -> $1206, an RTI instruction.
+  $FFFC/$FFFD -> $1206.
+  $FFFE/$FFFF -> $11F9, the IRQ dispatcher.
+These are stored vector values; RESET is not equivalent to a normal interrupt
+return, and this is not a claim that a hardware reset can safely be ignored.
+
+2.2 RAM and data map
+
+  Address/range    Description
+  -------------    --------------------------------------------------------
+  $0000-$00FF      Zero page: state variables, pointers and shared scratch.
+  $0100-$01FF      6502 hardware stack.
+  $0200-$03FF      [OPEN] Not comprehensively mapped.
+  $0400-$04FF      PRNG pool. Filled from SID noise and changed by $1D1B.
+  $0500-$05FF      [OPEN] Not comprehensively mapped.
+
+  $0600-$063F      HOME X coordinates for 64 planet/alien entries.
+  $0640-$067F      HOME Y coordinates; bit 7 is a visited marker.
+  $0680-$06BF      CURRENT X coordinates for the same entries.
+  $06C0-$06FF      CURRENT Y coordinates; departure code can set bit 7.
+                   Coordinate rendering masks Y with $7F.
+                   CURRENT positions can change when an alien is relocated.
+  $0700-$073F      Y coordinates in one visited-coordinate ring.
+  $0740-$077F      X coordinates in that ring; index in $DF.
+  $0780-$07BF      Y coordinates in a second coordinate ring.
+  $07C0-$07FF      X coordinates in that ring; index in $DE.
+
+  $0803           Program entry, JMP $09D0.
+  $0803-~$4EE7    Main identified code region; not a claim that every byte
+                   in this interval is an instruction.
+  $4EE8/$4EE9     Address of the current raster-IRQ stage.
+  $4EF2...        Sprite position offsets used with the pointer.
+  $4F1F-$4F28     Ten ship-menu hotspot enable entries.
+  $4F29-$4F32     Ship-menu hotspot X values.
+  $4F33-$4F3C     Ship-menu hotspot Y values.
+  $4F3D...        Bitmap row-address low-byte table.
+  $5005...        Bitmap row-address high-byte table.
+  $50BD+char      Character-code to font-glyph lookup used by $0F0D.
+  $50C1-$50D4     Pixel masks used by graphics routines.
+  $50D5-$50DC     Bit masks $01,$02,$04,...,$80 for decompression.
+  $5178...        Loader descriptors/text; not conversation records.
+  $5283/$5284...  Address table used to patch graphics code.
+  $529B-$52AA     Eight graphics-template pointers.
+  $54B2-$54C1     Face-mosaic Y positions.
+  $54C2-$54D1     Face-mosaic glyph indices.
+  $57F7-$581A     Nine conversation hotspots, four bytes per rectangle.
+  $581B/$582B     Disabled/enabled icon nibble lookup tables.
+  $5923-$5932     Per-alien-file pitch bases for reply beeps.
+  $5933-$593A     Flag masks $01,$02,$04,...,$80.
+  $593B-$5942     Script-operand masks $80,$40,$20,...,$01.
+
+  $5C00-$7BFF     Reused working area. Graphics and conversation have
+                   different interpretations of these bytes at different times.
+  $5C00-$5C7F     During conversation: word ID -> icon index map.
+  $5C80-$5C87     Eight player-message icon slots; displayed on the RIGHT.
+  $5C90-$5C98     Alien reply icons; builder pads to nine entries.
+                   Reply playback displays eight slots on the LEFT.
+  $5CA0...        Player word/token list, terminated by $FF.
+  $5CB0...        Alien reply word/token list, terminated by $FF.
+                   Do not treat the spacing of these buffers as a general
+                   guarantee for arbitrary malformed or synthetic scripts.
+
+  $6100...        Currently loaded alien data file.
+  $6100/$6101     Little-endian offset to its conversation script.
+  $6104/$6105     Face-image offset described by the loader/graphics notes.
+  $6108...        Three packed metadata bits per logical pattern operand.
+  $6108-$621B     Operand metadata area for the loaded file 0.
+  $621C-$67A0     File-0 script records.
+  $67A1          Script end byte, $FF.
+  $7C00-$7CFF     Graphics remapping lookup used by $1B76.
+
+  $8FE8...        Partial SID register shadow; $8FFA is used by noise setup.
+  $9000          SID volume shadow.
+  $9210...        Game flag bitset. Flag n uses byte floor(n/8), bit n mod 8.
+                   Save assembly copies 256 bytes beginning at $9210.
+  $9310          First blinking graphic, including a four-byte header.
+  $9394          Second blinking graphic, including a four-byte header.
+                   Each image is 4 x 4 cells = 32 x 32 pixels.
+  $9418-$96A8     123 high-bit-terminated vocabulary strings, IDs 0-122.
+                   IDs 1/2/3: HOUR/FREQUENCY/COORDINATE.
+                   ID 111: digit 0; IDs 112-120: digits 1-9.
+                   ID 121: blank; ID 122: @.
+  $96A9...        Padding after the vocabulary, before the icon mapping.
+  $9718-$9797     Icon -> word ID mapping, with bit 7 marking disabled icons.
+  $9798...        Packed graphics selected for EVEN icon indices.
+  $9C58...        Packed graphics selected for ODD icon indices.
+  $A118...        Font glyph data used by the character drawer.
+
+  $C000-$C3FF     Screen matrix area and sprite pointers.
+  $D000-$DFFF     CPU-visible I/O in the saved configuration.
+  $E000-$FF3F     Bitmap data.
+  $FFFA-$FFFF     Hardware vector bytes.
+
+The $0600/$0640 arrays already contain all 64 generated home positions. They
+are not merely a list of coordinates the player has learned in conversations.
+
+2.3 Important zero-page state
+
+  Address         Meaning
+  -------         --------------------------------------------------------
+  $04-$1E        Shared scratch. Meaning depends on the active routine.
+                  Includes graphics pointers, number-formatting work bytes,
+                  matcher state and reply-builder indices.
+  $26-$2E        Icon/text drawing scratch and parameters.
+  $30            Vocabulary-grid scroll offset.
+  $31/$32        Pointer in screen coordinates: X/2 and Y.
+  $38            Hovered icon index.
+  $39            Previous hovered icon, used to detect label changes.
+  $3A            Hover area: 0 none; 1 icon grid; 2 player row; 3 alien row.
+  $3B            Message insertion/cursor position, 0-8. It equals length
+                  only while inserting at the end; it is not a length field.
+  $3C/$3D        Blinking-element countdown and state.
+  $5C-$6B        Sprite X/Y register shadows.
+  $6C-$81        Other sprite shadows: X high bits, expansion, colors,
+                  pointers and sprite enable state.
+  $83/$84        Raster lines for IRQ stages.
+  $85/$86        One next-stage IRQ address.
+  $87/$88        Another next-stage IRQ address.
+  $89            Frame counter used by the wait routine.
+  $8A/$8B        Pointer X/2 and Y in sprite coordinates.
+  $90            Input bits read from CIA/keyboard/joystick handling.
+  $96            Fire/click state, also used by cursor animation.
+  $97            Pointer-speed state.
+  $99/$9A        Pointer X accumulator.
+  $9B            Clock subsecond counter; clock logic counts 50 frames.
+  $A0            PRNG state/index; changes with the $0400 pool.
+  $A1            Saves/restores X inside the PRNG routine.
+  $A5/$A6        Graphics-template pointer, not a dialogue-line pointer.
+  $A9-$AD        Drawing-window parameters.
+  $B2            Click latch used by $1033.
+  $C0/$C1        Elapsed minutes, little-endian 16-bit value.
+  $C2            Seconds, 0-59.
+  $D6/$D7        Script logical-operand index, little-endian.
+  $D8/$D9        Current script-record pointer, little-endian.
+  $DA            Current alien file index.
+  $DB            Current planet/alien table index; $FF means none.
+  $DC            Landing/status result; recognized aliens use their +4 flag.
+  $DD            Visit counter.
+  $DE/$DF        Coordinate-ring indices.
+  $E0/$E1        Ship X/Y coordinates.
+  $E5            Conversation continuation state; nonzero means resume.
+  $E6            Reply-produced state.
+  $E7            Encounter/conversation-ended state.
+  $E9            [INFER] Alien aboard indicator.
+  $EA            Index of the alien associated with transport actions.
+  $EB            Saved F5, used by the removal/time-bonus routine.
+  $EC/$ED        Time limit in minutes; initialized to 120.
+  $FB            Countdown affecting flag F7.
+  $FD            Qualifying win-target removal event counter.
+
+2.4 Game flags
+
+Flag address and mask:
+  address = $9210 + floor(n / 8)
+  mask    = 1 << (n mod 8)
+
+F1-F4       Which member of the four-planet alien file is being encountered.
+             For planet index i, the game sets F((i AND 3) + 1).
+F5          Read by the alien-transport routine and saved in $EB.
+F6          Conversation-script request enabling an additional UI action.
+             The loop tests it before updating the menu. The transport meaning
+             follows the surrounding code; the exact player UI is [INFER].
+F7          Encounter state with a nominal 1/16 random set opportunity per
+             $4991 start, and a countdown fallback. Initially $FB=15; without
+             an earlier random hit, start 16 forces F7. Automatic greeting
+             initialization also calls this routine. Continuation clicks do
+             not run the fresh-start random/countdown logic.
+F8          Set at encounter initialization if the home lead is marked visited.
+F9          Refreshed with a nominal 1/4 random set opportunity per fresh start.
+F10-F29     Temporary conversation state. Reset on a new encounter.
+F40-F49     Set by new-game initialization.
+
+F100 + 5*i + k is per-planet state for index i and slot k=0..4:
+  k=0,3    Set by $479F; cleared by $47E5.
+  k=0,1    Cleared by relevant departure bookkeeping at $4D57.
+  k=2      Home-position match state recomputed by landing classification.
+  k=4      Used for the recognized alien's $DC status.
+
+The home-position flag is commonly described as "alien at home". The actual
+classifier also checks visited/location state; it is not a general-purpose
+comparison of the two coordinate arrays independent of landing logic.
+
+Persistent flags used by file 0 include:
+  F100     Planet-0 slot 0; part of the planet-1 story gate.
+  F102     Planet-0 home-position flag.
+  F103     Planet-0 slot 3; cleared by the away-from-home Yoko sequence.
+  F108     Planet-1 slot 3; set by that sequence.
+  F118     Planet-3 slot 3; set by that sequence and cleared at the final reveal.
+  F420     Small Yoko's completed greeting/introduction memory.
+  F435     Maxon's successful first story stage completed.
+  F436     Maxon's later accusation stage completed.
+  F437     Excludes Maxon's final block when set. File 0 does not set it.
+  F999     False barrier in this script; new-game code clears it and file 0
+             does not set it. Other alien files have not been audited.
+
+
+3. CODE ROUTINES: ADDRESSES AND SHORT DESCRIPTIONS
+================================================
+
+3.1 System, timing, sound and graphics
+
+  $0803        Program entry; jumps to startup at $09D0.
+  $0A76        Ship-menu action: runs $422F, then alien removal at $47E5;
+                 indices 60/61 increment $FD. At $FD=2 it calls $0A94.
+  $0A94        End-sequence entry reached by the win-target counter.
+  $0B06        Clears a SID voice's gate through the register shadow.
+  $0BB5        Alien-data loader/copy path; destination starts at $6100.
+  $0CD8        Assembles save data in the reused buffer starting at $5C00.
+  $0EB6        Draws clock/counter digits from $C0/$C1/$C2.
+  $0F0D        Draws a text/number glyph; uses self-modifying operands.
+  $0F5D        Binary-to-decimal entry with value in X/Y.
+  $0F61        Decimal conversion using the value already in scratch bytes.
+  $1033        Click/menu selection test using the enable and hotspot tables.
+  $1161        Waits for the frame counter to reach a threshold, then resets it.
+  $11F9        IRQ dispatcher; saves registers and jumps through $4EE8/$4EE9.
+  $1207        Sprite IRQ stage; copies sprite shadows to VIC registers.
+  $1255        Input/clock IRQ stage; updates pointer and game time.
+  $1418        Compares elapsed minutes against the configured time limit.
+  $14EE        Calculates a bitmap address using the row tables.
+  $154D        Rectangle copy/blit, advancing bitmap and attribute rows.
+  $1644        Header-driven cell blit into the bitmap; variable dimensions.
+  $173D        Compressed image unpacking entry.
+  $178E        Unpacking path for color, screen and bitmap components.
+  $1821        Bit-mask decompression routine.
+  $188C        Graphics/blit state setup.
+  $1A76        Seeds coordinate-dependent PRNG state and pool.
+  $1B43        Chooses a graphics template via the table at $529B.
+  $1B54        Builds face-mosaic positions and glyph selections.
+  $1B76        Remaps $5C00-$7BFF through the lookup at $7C00.
+  $1D1B        PRNG step using $A0 and the $0400 page; preserves X via $A1.
+  $1D30        Obtains two random values.
+  $1D3A        Random selection helper with an upper-bound check.
+  $4569        Draws one 19-scanline icon using packed nibble lookups.
+  $46CB        New game: initializes state, time allowance and 64 positions.
+  $4771        Seeds the $0400 pool from SID noise.
+
+3.2 Planet state and transport
+
+  $479F        Clears $E9, sets transported alien's +0/+3 flags, writes the
+                 ship position into its CURRENT arrays, reclassifies landing.
+                 [INFER] Put an alien down at the ship's position.
+  $47C1        Sets $E9, saves F5 in $EB, copies $DB into $EA, clears that
+                 alien's +2 flag, and reclassifies the location.
+                 [INFER] Take an alien aboard.
+  $47E5        Clears $E9 and the indexed alien's +0/+3 flags. If $EB is set,
+                 adds 60 minutes to the allowance. [INFER] Remove/destroy it.
+  $4CD6        Inserts ship coordinates into the second coordinate ring.
+  $4D01        Searches the second coordinate ring.
+  $4D1C        Departure/visited-coordinate bookkeeping and flag updates.
+  $4D99        Classifies landing; sets $DB/$DA and status, checks home match.
+
+Exact transport button sequences, revisit accessibility and removal outcomes
+remain unconfirmed by a complete UI playthrough. The memory writes above are
+the supported behavior behind those inferred action names.
+
+3.3 Conversation UI
+
+  $3F51-$4158  Main loop: clock, pointer, blink, hover, click and flag checks.
+  $40B4        Mouth-region test; $40BF calls $4948, $40C2 calls $4370.
+  $40E6        Inserts a selected enabled icon at the player cursor position.
+  $411A        Handles a click inside the player row to reposition the cursor.
+  $4300        Positions the player-message sprite cursor.
+  $4331        Clears $5C80 through $5C90 inclusive and resets $3B.
+  $434B        Draws the eight player slots on the RIGHT, starting X/2=$58.
+  $4370        Plays the eight alien slots on the LEFT, starting X/2=$08,
+                 with placeholders, timing and beeps.
+  $43BC        Generates a reply beep with random pitch variation.
+  $43D3        Finds and prints a vocabulary name from the table at $9418.
+  $4438        Rectangle test: inside returns carry set; upper bounds excluded.
+
+3.4 Conversation interpreter
+
+  $4816        Encounter initialization. Reseeds RNG, clears F1-F29, selects
+                 F1-F4, sets F8 when applicable, builds/enables vocabulary,
+                 and clears PATTERN used bits.
+  $4851        Builds the word-ID to icon-index table at $5C00.
+  $4893        Resets operand index and sets script pointer from $6100/$6101.
+  $48AB        Reads record type, operand-byte length and flag byte.
+  $48D3        Fetches/advances a logical operand; tokens 1-3 occupy three bytes.
+  $48EF        Advances the record pointer and global pattern-operand index.
+  $4925        Reads the player word list, stepping over special-token payloads.
+  $4934        Automatic encounter greeting/startup path.
+  $4948        Mouth-click interpreter entry: fresh message or continuation.
+  $4991        Fresh script walk: countdown/random flags, then script reset.
+  $49C1        Main script-walking loop.
+  $4A67        Decodes a two-byte signed flag operand.
+  $4A88        Executes action operands: set/clear flags or end encounter.
+  $4AB8        Processes consecutive action records following a match/condition.
+  $4AC0        Condition/block control flow, including skipping and barriers.
+  $4AF1        Evaluates conditions and time-comparison records.
+  $4B63        Pattern matcher: used/repeat/random/ordered/always/operand tests.
+  $4BFD        Converts all eight player icon slots into the word/token list.
+  $4C32        Builds alien reply icons from the word/token list at $5CB0.
+  $4C6A        COORDINATE-token rendering branch inside $4C32.
+  $4CBB        Appends decimal digit icons to the reply.
+
+3.5 Flag and operand metadata helpers
+
+  $4E1C        Computes per-planet index: 100 + 5*Y + X.
+  $4E3B        Converts an absolute flag index in X/Y to byte and bit indices.
+  $4E51        Clears a per-planet flag.
+  $4E57        Clears an absolute flag.
+  $4E6A        Sets a per-planet flag.
+  $4E70        Sets an absolute flag.
+  $4E7F        Tests a per-planet flag.
+  $4E85        Tests an absolute flag; returns A=0 or A=1.
+  $4E99        Tests pattern operand metadata plane 0: required-word bit.
+  $4E9D        Tests plane 1: set suppresses the operand from the reply.
+  $4EA1        Tests plane 2: clear makes an optional operand a trigger.
+
+
+4. HOW THE CONVERSATION SYSTEM WORKS
+====================================
+
+4.1 Player interaction
+
+Select pictogram words from the vocabulary grid. The player composition is on
+the RIGHT; the alien's reply appears on the LEFT. The player buffer has eight
+icon slots. Clicking inside the player row moves the insertion cursor; the
+existing words after that position are not simply discarded.
+
+The mouth control invokes interpretation. In screen coordinates, its hotspot
+is x=144..175, y=107..126. These are bitmap-screen coordinates, excluding the
+emulator window's border and scaling. The rectangle table itself stores X/2.
+
+Conversation hotspot summary (upper bounds exclusive):
+  Region   Screen X       Screen Y       Purpose
+    0      [24,56)        [180,200)       Lower-left control
+    1      [264,296)      [180,200)       Lower-right control
+    2      [64,256)       [183,207)       Bottom scroll strip
+    3      [48,272)       [137,175)       Two-row vocabulary grid
+    4      [176,304)      [112,134)       Player message row
+    5      [16,144)       [112,130)       Alien reply row
+    6      [272,300)      [136,156)       Upper right-side control
+    7      [272,300)      [156,176)       Lower right-side control
+    8      [144,176)      [107,127)       Mouth / speak
+
+The blinking graphic occupies 32 x 32 pixels at (144,104), overlapping the
+mouth area. Its countdown is eight main-loop iterations, approximately 48
+frame-counter ticks while idle, with additional delays possible.
+
+4.2 Fresh input versus continuation
+
+Fresh input ($E5=0):
+  1. Convert all eight $5C80 slots through $9718 into $5CA0.
+  2. Terminate the word list with $FF and clear/redraw the player row.
+  3. Reject an empty converted player message.
+  4. Reset the script walk to its beginning and update fresh-start flags.
+  5. Walk conditions and patterns until a reply is produced or the walk stops.
+  6. Convert the reply at $5CB0 to icons at $5C90 and animate it.
+
+Continuation ($E5 nonzero):
+  - The next mouth click resumes the walk with the SAME earlier player words.
+  - A newly composed message is not read by that continuation click.
+  - Consecutive action records may already have run after a matched pattern.
+  - Continue clicking to receive later eligible replies in script order.
+  - When no further reply is produced, continuation clears. New player input
+    can then be accepted. An encounter-ending action instead sets $E7 and
+    disables further normal conversation for that encounter.
+
+This is why a useful answer is often several mouth clicks after the phrase
+that triggered it. It is also why entering the answer to a question too early
+may appear ineffective: the game may still be continuing the previous input.
+
+The automatic greeting uses $4934 rather than an ordinary fresh player
+message. Its continuations can emit unconditional lines even with no player
+words in the internal list.
+
+4.3 Record format and matching
+
+Script address = $6100 + little-endian word at $6100/$6101.
+
+Each ordinary record contains:
+  byte 0: type in bits 7-5, operand BYTE count in bits 4-0
+  byte 1: type-specific flags
+  following bytes: operands
+The single byte $FF marks the script end.
+
+Identified types:
+  $00 PATTERN  Tests player words and supplies alien reply words.
+  $40 ACTION   Sets/clears game flags; zero operands ends the encounter.
+  $80 CONDITION Tests game flags and controls which following block is visited.
+  $A0 TIME     Passes when elapsed minutes are greater than its threshold.
+  $C0 TIME     Passes when elapsed minutes are at most its threshold.
+Only $00/$40/$80 occur in file 0. Other type values are not characterized here.
+
+Pattern flags:
+  $80 used       Already matched in this encounter.
+  $01 repeat     Allows matching again despite used status.
+  $08 random     Skips the record when (RNG AND 7) equals 7.
+  $04 ordered    Requires operands as an ordered subsequence of player words.
+                  No file-0 pattern uses this mode.
+  $02 always     Bypasses ordinary word-content tests in the unordered path.
+
+Pattern operands have three packed metadata bits each:
+  Plane 0 set:    REQ  - this word must occur in the player message.
+  Plane 1 clear:  SAY  - include this operand in the alien reply.
+  Plane 2 clear:  TRIG - optional word can contribute a positive match.
+
+For the ordinary unordered mode, all REQ words must occur, and at least one
+REQ or eligible TRIG word must be found. Extra words are permitted. Order
+does not matter for the file-0 passwords. A trigger need not be spoken back;
+a spoken word need not be a trigger.
+
+A matched pattern with no SAY operands is silent. The engine can execute its
+following actions and keep scanning until it finds an audible reply. A
+pattern skipped because its words did not match does not automatically cause
+its following action records to execute.
+
+Bit-plane address for logical pattern-operand index j and plane p=0,1,2:
+  address = $6108 + 3*floor(j/8) + p
+  mask    = $80 >> (j mod 8)
+
+The index counts logical operands, not records or raw bytes. A special token
+with two parameter bytes still occupies one logical operand position.
+
+Condition/action flags have different meanings from pattern flags. Condition
+bit $80 is a stop-on-failure barrier, not an already-used marker. Bits $40/$20
+participate in block boundaries/skipping; file-0 major blocks use flags $60.
+Action bit $01 implements once-only behavior through its used bit, not the
+pattern's repeat behavior. File-0 action flags are all zero.
+
+Flag operands are signed two-byte values: positive n tests/sets Fn; a negative
+encoding represents !Fn for a test, or clearing Fn for an action. Conditions
+combine their listed flag requirements before admitting their block.
+
+4.4 Reply tokens and coordinates
+
+Most reply bytes are vocabulary word IDs, mapped to icon indices through
+$5C00. The special three-byte tokens are:
+  [1,a,b] HOUR       Formats a value; zero parameters use the current clock.
+  [2,a,b] FREQUENCY  Consumes both parameters but this reply routine does not
+                     append numeric digit icons for them.
+  [3,a,b] COORDINATE Selects a position and renders X, a separator, then Y.
+
+For a COORDINATE token:
+  if a != 0:
+      i = a - 1
+      X = memory[$0600 + i]
+      Y = memory[$0640 + i] AND $7F
+  otherwise:
+      i = b - 1
+      X = memory[$0680 + i]
+      Y = memory[$06C0 + i] AND $7F
+
+The token starts with the coordinate pictogram and appends decimal digit icons
+with separator icon $6F. Sending the COORDINATE pictogram is not a universal
+request for coordinates: player conversion drops word ID 3. The reliable
+method is to satisfy the particular alien's story and password conditions.
+
+4.5 Practical conversation habits
+
+  - Start with a relevant short phrase; up to eight icons fit.
+  - Keep clicking the mouth through pending replies before sending a new answer.
+  - Listen past general chatter to reach the character's own script block.
+  - Do not assume an early friendly reply means the requested quest action ran.
+  - Separate temporary encounter flags from persistent story progress.
+  - Some lines are random-gated; an omitted line does not necessarily mean
+    the required word or password was wrong.
+
+Examples of words that avoid the general file-0 chatter triggers are BLOOD,
+ME, YOU, YES, NO, PLANET, IDEA, CODE, POP and MAXON. "Avoid general chatter"
+does not mean "safe answer to every question": NO can fail an identity test,
+and PLANET can trigger Yoko's own quest logic once introduced.
+
+YOKO, RENDEZ-VOUS, DEAD, KNOW, FRIEND and several other quest words also match
+earlier general chatter. That usually costs extra continuation clicks.
+Hostile vocabulary can end an encounter: the general CURSE reply, when it
+passes its random gate, is followed by an end action; Yoko also has specific
+INSULT and KILL+YOKO termination paths.
+
+
+5. QUESTS AND STORY REPRESENTED BY ALIEN FILE 0
+===============================================
+
+The script dispatches by the encounter flag:
+  Planet index 0 -> F1
+  Planet index 1 -> F2
+  Planet index 2 -> F3
+  Planet index 3 -> F4
+The loader selects alien file floor(i/4), so these four entries share file 0.
+After relocation, these indices still identify the same game entries; an
+alien's present location need not equal its original home coordinates.
+
+5.1 Planet 0: Small Yoko at home
+
+Main home block: $636E, requiring F1 and F102.
+
+The alien introduces himself as SMALL YOKO and identifies his planet as
+BOW-BOW. He asks for the player's identity. The meaningful answer is BLOOD.
+The silent BLOOD match at $637D sets temporary F10 through $6380.
+
+Once introduced, the alien says HOWDY BLOOD at $63D0; the following action
+sets persistent F420. This is an ALIEN greeting, not another player password.
+F420 provides an introduction shortcut on later encounters. F12 prevents
+repeating the full post-introduction greeting during the same encounter.
+
+He talks about POP, a scientist and prisoner, and about the DUPLICATE wanting
+genetic reproduction. Several topics lead to a request for help.
+
+Ways to set F13 within the introduced home story:
+  Player phrase          Matching record    Requirement
+  -------------          ---------------    -------------------------------
+  ME SEARCH POP          $647D              All three words required.
+  PLANET                 $648E              PLANET alone is sufficient.
+  CROOLIS-ULV            $648E              This word alone is sufficient.
+  DEAD GENETIC           $6496              Both words required.
+
+The first phrase replies YOU SEARCH POP YOU GREAT BLOOD. The PLANET /
+CROOLIS-ULV and DEAD GENETIC matches are silent, but their following actions
+set F13. [EXEC] Both single-word alternatives at $648E were confirmed.
+
+With F13, the block at $64A3 tells the player about CROOLIS-ULV DEAD GENETIC,
+who is described as POP's friend. Yoko says POP helped with reproduction.
+The sequence includes:
+  ME KNOW PLANET CROOLIS-ULV DEAD GENETIC
+  DEAD GENETIC GREAT FRIEND POP
+  POP HELP DEAD GENETIC POP GIVE REPRODUCTION
+  IDENTITY PLANET DEAD GENETIC =
+  ME LIKE PLAY
+  YOU TELEPORT ME GOOD PLANET
+  ME SAY YOU IDENTITY PLANET DEAD GENETIC
+
+The final action at $64DB sets F6. No coordinate token is emitted in this
+home sequence. [INFER] Its practical request is to transport Yoko elsewhere.
+
+5.2 Planet 0: Small Yoko away from home
+
+Block: $64DF, requiring F1 and !F102.
+
+This sequence does not require a further word password. Once that state is
+active, its unconditional lines can be reached by continuing the greeting or
+an appropriate fresh message. Yoko says:
+  (SOB) (SOB) PLANET NOT HOME
+  YOKO BRAIN DESTROY (SOB) (SOB)
+  YOU KILL ME (SOB)
+  POP POP (SOB)
+  YOU GO PLANET CROOLIS-ULV DEAD GENETIC
+  YOU GO URGENT PLANET TRAP 4
+  COORDINATE [home of planet index 12]
+  HELP YOKO YOKO YOKO
+  DEAD DEAD DEAD
+  DEAD
+
+The coordinate record is $650E. The actions at $6521 clear F103 and set F118
+and F108. The action at $6529 ends the encounter. [EXEC] The coordinate reply
+was reached by running the actual interpreter with the away-state gate.
+
+[STORY] The dialogue depicts a breakdown or apparent death after relocation.
+It does not, by itself, prove permanent removal of that alien from the map.
+Clearing F103 satisfies one prerequisite for later stories. Planet 1 also
+requires F100; !F103 alone is not enough to admit its block.
+
+5.3 Planet 1: the alien claiming to be Yoko
+
+Major block: $6533, requiring F2, F100 and !F103.
+
+This alien says ME NOT IZWAL NO NO and ME SMALL YOKO, then insists he is not
+dead. He says a DUPLICATE held him prisoner and freed him. The dialogue
+includes the clue:
+  DUPLICATE FREE ME PLANET IDEA 3 4 9
+
+The phrase IDEA 3 4 9 is useful later with Maxon. The alien's claims are
+reported here as dialogue, not independently proven identity facts.
+
+Player password:
+  RENDEZ-VOUS 6 7
+
+All three word tokens must be present for $65A6 to match. The following
+action at $65AB sets temporary F10. Continue the reply sequence to reach:
+  BLOOD YOU GREAT
+  ME GIVE YOU GREAT INFORMATION
+  (LAUGH) (LAUGH) ME KNOW PLANET DUPLICATE
+  PLANET DUPLICATE =
+  COORDINATE [home of planet index 60]
+  ME NOT WANT DUPLICATE KILL YOU (SOB) (SOB)
+  BYE BLOOD
+
+The coordinate record is $65DA; $65ED ends the encounter. [EXEC] The password
+and resulting coordinate reply were confirmed under F2, F100 and !F103.
+
+5.4 Planet 2
+
+No dedicated F3 story block occurs in file 0. This entry uses the general
+conversation records. With F999 clear, the final barrier at $6796 prevents
+the trailing record at $679A from being reached.
+
+5.5 Planet 3: Maxon, the scientist/Pop figure
+
+[STORY] The dialogue identifies the speaker as MAXON and connects him with
+Small Yoko through the word POP. Reading him as Yoko's father is supported
+by the story language, rather than a separately encoded family relation.
+
+Stage A: interrogation and introduction
+  Block $65F5: F4, !F103 and !F435.
+
+  Question                 Player answer   Effect
+  -----------------------  -------------   -------------------------------
+  IDENTITY ?               BLOOD           Sets F20.
+  YOU KNOW CODE ?          YES             Sets F22.
+  FRIEND ENEMY ?           FRIEND          Sets F24.
+
+Wait for the previous continuation to finish before submitting each new
+answer. General chatter, especially on FRIEND, may precede the story reply.
+
+Failure behavior differs by question:
+  - Failing identity after it has been asked produces the line at $6611:
+      DANGER PLANET RENDEZ-VOUS 6 7 FORBIDDEN
+    The encounter then ends. This reveals the planet-1 password but does
+    NOT set F435 or finish Maxon's introduction stage.
+  - Failing the code question produces ENEMY DEAD KILL KILL (CURSE) and
+    ends the encounter.
+  - Failing the friendship question produces (INSULT), clears F25, and
+    asks again. It does NOT end the encounter. [EXEC] Retrying FRIEND works.
+
+After successful answers, Maxon calls himself a scientist, says the DUPLICATE
+held him prisoner and wanted genetic reproduction, and directs Blood toward
+Small Yoko. Although he discusses knowing the duplicate's planet, this first
+stage contains no coordinate token. The closing action at $66E3 sets F435;
+$66E7 ends the encounter.
+
+Stage B: accusation
+  Block $66E9: F4, !F103, F435 and !F436.
+
+  Maxon says the DUPLICATE told him Blood killed Small Yoko. He threatens
+  Blood and grieves. The action at $670F sets F436; $6713 ends the encounter.
+  This stage contains no coordinate reply.
+
+Stage C: proof that Yoko is not dead
+  Block $6715: F4, !F103, F436 and !F437.
+
+  Two matches are needed in this encounter:
+    YOKO NOT DEAD  -> $6739; action $6742 sets F10.
+    IDEA 3 4 9     -> $6746; action $674C sets F11.
+
+  Each phrase requires every indicated word. They can be sent separately
+  within the same encounter or together as seven icons:
+    YOKO NOT DEAD IDEA 3 4 9
+
+  The gate at $6750 requires both F10 and F11. Its reply sequence includes:
+    BLOOD BLOOD YOU GREAT GREAT GREAT
+    SMALL YOKO NOT DEAD
+    PLANET IDEA 3 4 9
+    COORDINATE [home of planet index 1]
+    ME GIVE YOU PLANET DUPLICATE
+    COORDINATE [home of planet index 61]
+    YOU GO SEARCH DUPLICATE
+    YOU GREAT BLOOD
+    ME LIKE YOU
+    BYE BLOOD
+
+  Coordinates are at $676B and $6777. The action at $6790 clears F118;
+  $6794 ends the encounter. [EXEC] The seven-icon message reaches both
+  coordinate records under the appropriate story state.
+
+  F437 is not set anywhere in file 0. The code therefore does not establish
+  that this final story can never recur; changes by other files and physical
+  revisit access remain outside the validated scope.
+
+5.6 Story interpretation and the winning objective
+
+[STORY] The local storyline is about a frightened Small Yoko, his scientist
+Pop/Maxon, captivity, genetic reproduction, and claims made by or about the
+DUPLICATE. Relocating Yoko leads to apparent tragedy. A second speaker claims
+to be Yoko and not dead. Maxon moves from cooperation to accusation, then
+accepts information about Yoko's survival and discloses further coordinates.
+
+[CODE] The script labels home indices 60 and 61 as DUPLICATE destinations.
+The ship-menu path at $0A76 calls $47E5 and checks the associated alien index
+in $EA. If it is 60 or 61, it increments $FD. At $FD=2 it calls the end
+sequence at $0A94. The excerpt implements a qualifying-event counter, not an
+explicit bitset proving two distinct targets were completed.
+
+[INFER] The intended gameplay objective is to find and remove/destroy the
+two duplicate targets. The exact capture/destruction interface and its
+accessibility checks were not validated through a full UI playthrough.
+
+
+6. HOW TO MAKE ALIENS REVEAL THE NEXT COORDINATES
+================================================
+
+There is no single universal "tell me coordinates" phrase. Coordinate replies
+belong to specific story blocks. Progress depends on the alien index, persistent
+story flags, temporary answers and continuation through the reply sequence.
+
+6.1 Quick reference
+
+  Speaker/state         Player action                  Destination record
+  --------------------  -----------------------------  -------------------
+  Small Yoko at home    Introduce yourself with BLOOD; No coordinates here.
+                        then PLANET, CROOLIS-ULV,
+                        ME SEARCH POP, or DEAD GENETIC.
+                        Continue to the transport hint.
+
+  Small Yoko away       Enter the F1 + !F102 story     $650E -> home 12.
+  from home             state and continue his lines.
+                        No additional password.
+
+  Planet-1 claimant    With F2 + F100 + !F103, say    $65DA -> home 60.
+                        RENDEZ-VOUS 6 7; continue.
+
+  Maxon final stage    With F4 + !F103 + F436 +       $676B -> home 1;
+                        !F437, say YOKO NOT DEAD       $6777 -> home 61.
+                        IDEA 3 4 9; continue.
+
+These are script prerequisites and tested conversation outcomes. They are
+not a claim that every prerequisite can be reached by an already-verified
+sequence of transport and navigation button presses.
+
+6.2 Suggested use of the validated dialogue information
+
+1. On the initial Small Yoko encounter, finish the greeting, answer BLOOD when
+   fresh input is accepted, and continue through his response. Once introduced,
+   use PLANET for a short trigger, or ME SEARCH POP / DEAD GENETIC for more
+   explicit phrases. Continue to the request to teleport him to a good planet.
+
+2. [INFER] Use the game's transport mechanics to move Small Yoko away from his
+   home. The associated code is $47C1 for taking aboard and $479F for putting
+   down. The exact UI sequence has not been established here. The required
+   conversation state is the same alien index 0 with its home flag F102 clear.
+
+3. In the away-state conversation, keep clicking the mouth through the entire
+   sequence. Record the coordinates after YOU GO URGENT PLANET TRAP 4. They
+   refer to HOME INDEX 12, not internal index 4. Continue through the ending
+   so the story's later flag changes have run.
+
+4. At the planet-1 claimant, provided F100 remains set and F103 is clear, use
+   RENDEZ-VOUS 6 7. Continue past generic chatter and the claimant's story.
+   Record the home coordinates of duplicate index 60. Also note the spoken
+   clue IDEA 3 4 9 for Maxon's final stage.
+
+5. At Maxon's introduction stage, answer BLOOD, then YES, then FRIEND, each
+   after the previous dialogue has finished accepting continuations. Continue
+   to BYE and the stage's ending to establish F435.
+
+6. On a later accessible Maxon encounter, continue through the accusation
+   sequence, establishing F436. This sequence provides no coordinates.
+
+7. At Maxon's final stage, send YOKO NOT DEAD IDEA 3 4 9. Keep clicking through
+   the general chatter and grief lines. Record BOTH coordinate replies: the
+   claimant's home index 1 and duplicate home index 61.
+
+Steps 4 and 5 need not be a rigid chronological order if their flags are
+already satisfied and the password is already known. This is a dependency
+guide for the dialogue, not a complete navigation itinerary.
+
+6.3 Learning RENDEZ-VOUS 6 7 through the dialogue
+
+If the player does not already know the password, the validated disclosure
+in this file is Maxon's identity-failure line. After he asks IDENTITY ?, NO
+is a tested failing answer that produces:
+  DANGER PLANET RENDEZ-VOUS 6 7 FORBIDDEN
+
+That encounter ends WITHOUT setting F435. A subsequent Maxon encounter still
+starts the interrogation stage. Therefore the stage count is:
+
+  Password known beforehand:
+    Encounter 1: successful BLOOD / YES / FRIEND introduction -> F435.
+    Encounter 2: accusation sequence -> F436.
+    Encounter 3: YOKO NOT DEAD IDEA 3 4 9 -> final coordinates.
+
+  Password learned by failing identity:
+    Encounter 1: identity failure reveals RENDEZ-VOUS 6 7; no F435.
+    Encounter 2: successful introduction -> F435.
+    Encounter 3: accusation sequence -> F436.
+    Encounter 4: final password -> final coordinates.
+
+These counts assume the game permits the needed later encounters and the
+other gates remain satisfied. Physical revisiting has not been demonstrated.
+
+6.4 What is missing from the navigation chain
+
+Only alien file 0 was decoded and exercised. Its planet-12 clue leads to
+file 3, which serves indices 12-15. Those scripts are not present in the
+validated material. No validated file-0 coordinate reply reveals Maxon's
+home index 3, and file 0 does not establish the route from the planet-12
+lead to Maxon. That requires evidence from other alien files/gameplay.
+
+The coordinates of index 3 are visible in the saved RAM and are listed below
+as a reverse-engineering aid. Reading them from RAM is different from proving
+how a player would learn them naturally in the story.
+
+6.5 Coordinates in THIS saved game
+
+  Index   Home X,Y    Role in the validated material
+  -----   --------   ------------------------------------------------------
+    0     145,69     Starting Small Yoko entry; called BOW-BOW in dialogue.
+    1     248,99     Claimant/Yoko entry; revealed by Maxon's final sequence.
+    2     103,14     File-0 entry without a dedicated F3 story block.
+    3      40,23     Maxon entry; coordinates obtained from RAM, not a
+                      validated file-0 coordinate disclosure.
+   12     140,33     Next lead from Small Yoko's away-state sequence.
+   60     195,85     Duplicate destination revealed by the planet-1 password.
+   61     143,74     Duplicate destination revealed by Maxon's final password.
+
+All these entries have identical home/current positions in the supplied dump.
+Relocation can change the current arrays later. All four coordinate tokens
+in file 0 use HOME positions:
+  $650E: [3,13,0] -> index 12 -> (140,33)
+  $65DA: [3,61,0] -> index 60 -> (195,85)
+  $676B: [3, 2,0] -> index  1 -> (248,99)
+  $6777: [3,62,0] -> index 61 -> (143,74)
+
+Use the coordinates actually spoken in the player's game. These numeric
+examples are not universal map locations or passwords.
+
+
+7. USING THE REFERENCE FOR REVERSE ENGINEERING
+==============================================
+
+Useful observation points for a future live test:
+  $4948  Mouth-click entry; inspect $E5 to distinguish fresh input/continuation.
+  $4BFD  Player conversion; inspect all eight $5C80 slots and resulting $5CA0.
+  $49C1  Script walker; inspect $D8/$D9 and $D6/$D7.
+  $4C32  Reply builder; inspect $5CB0 before conversion and $5C90 afterward.
+  $4E57  Absolute flag clear.
+  $4E70  Absolute flag set.
+  $47C1  Suspected take-aboard operation.
+  $479F  Suspected put-down operation.
+  $47E5  Suspected remove/destroy operation.
+
+To check a coordinate without following the story, read:
+  home(i)    = (memory[$0600+i], memory[$0640+i] AND $7F)
+  current(i) = (memory[$0680+i], memory[$06C0+i] AND $7F)
+This is a debugging shortcut, not an in-game dialogue solution.
+
+Addresses frequently misidentified in older notes:
+  $4C89  PHA inside the coordinate renderer, not an interpreter entry.
+  $4D1C  Planet/visited bookkeeping, not message interpretation.
+  $4E51 and $4E6A  Flag operations, not pixel plotting.
+  $9210  Flag bitset, not a pixel bitmap.
+  $A5/$A6  Graphics-template pointer, not a dialogue pointer.
+  $1A03  Inside an instruction operand, not a callable response routine.
+  $50D9  Byte in a decompression bitmask table, not a reply-selection table.
+
+The older asm_dir/blood_loaded_0803.asm.txt matches only 27 of its 12,858
+instructions at the listed addresses in this image. Use the saved dump and
+asm_dir/captainblood_conversation.asm for this address space. The latter is
+an execution trace and omits untaken paths; fresh disassembly of the dump is
+needed for those paths.
+
+
+8. SOURCE AND REPRODUCIBILITY RECORD
+====================================
+
+Workspace root:
+  /Users/marci/building_agents/C64RE_agent
+
+Primary memory image, relative to that root:
+  memdump_dir/landed_blood.bin
+SHA-256:
+  9f89e785beba878359b46e95174c47330f5e2b2ab43d2a1efb8e12ba3f469dc1
+
+Validation artifacts:
+  text_dir/captainblood/validation_report.md
+  text_dir/captainblood/validation/results.json
+  text_dir/captainblood/validation/live_comparison.json
+  text_dir/captainblood/validation/evidence.asm
+  text_dir/captainblood/validation/validate_content.py
+
+Underlying source notes, interpreted with the validation corrections:
+  text_dir/captainblood/conversation_routines_verified.md
+  text_dir/captainblood/memory_map_verified.md
+  text_dir/captainblood/conversation_coordinate_reveal.md
+  text_dir/captainblood/alien_script_file0_explained.md
+  text_dir/captainblood/alien_script_file0_decoded.txt
+  text_dir/captainblood/decode_alien_script.py
+
+The decoder reproduces the file-0 listing, but its source still over-reads
+the vocabulary and opens its default path before checking a supplied path.
+Its condition/action flag labels also reuse pattern meanings incorrectly.
+This reference applies the validated corrections; it does not imply that
+those older source files or the decoder were rewritten.
+
+Outstanding work for a full game reference:
+  - Decode the remaining alien files and connect their coordinate clues.
+  - Confirm transport, encounter access and revisits through the real UI.
+  - Test the full intended quest route without synthetic flag setup.
+  - Map the remaining landscape, flight, menu and unused-memory regions.
+  - Establish whether other scripts change F437/F999 or alter the apparent
+    identities and story outcomes described here.
+
+END OF REFERENCE

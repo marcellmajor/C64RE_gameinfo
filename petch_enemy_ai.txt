@@ -1,0 +1,170 @@
+PETCH (C64) — ENEMY AI ANALYSIS
+================================
+
+SUMMARY
+-------
+Enemies actively chase the player, but only probabilistically. Per frame
+they either make a player-seeking decision OR coast in their current
+direction. Chase frequency scales with level number.
+
+  - NOT pure random movement
+  - NOT pure pursuit
+  - Probabilistic greedy chase on one axis (X or Y, coin-flipped),
+    with "keep going" fallback when blocked
+  - No pathfinding, no look-ahead, no memory
+
+DIFFICULTY KNOBS
+----------------
+Two independent values, both set at level start:
+
+1) $0D7F = chase-frequency threshold
+   Set at $1D73-$1D83:  threshold = (level * 8) + $20  (8-bit, ASL-capped)
+
+   Per-frame P(intentional chase) = threshold / 256:
+     Level  Threshold  P(chase)
+       1      $28         ~16%
+       2      $30         ~19%
+       4      $40         ~25%
+       8      $60         ~38%
+      ~20+    wraps       erratic
+
+2) $0D80,X = per-enemy "type/state" byte
+   Set at $4B20:  if level >= 4, store level; else store 1
+   Higher state (2,3) lets enemies pass through stunned/cracking ice
+   tiles ($84/$86/$88/$8B) that state-1 enemies cannot.
+
+PER-FRAME ENEMY UPDATE ($4880, called from main loop $1034)
+-----------------------------------------------------------
+4880  A2 00        LDX #$00
+4882  BD 80 0D     LDA $0D80,X       ; per-enemy state
+4885  C9 01        CMP #$01          ; loop until an active enemy found
+4887  F0 0E        BEQ $4897
+4889  C9 02        CMP #$02
+488b  F0 0A        BEQ $4897
+488d  C9 03        CMP #$03
+488f  F0 06        BEQ $4897
+4891  E8           INX
+4892  E0 04        CPX #$04
+4894  D0 EC        BNE $4882
+4896  60           RTS
+
+4897  8A           TXA
+4898  A8           TAY
+4899  48           PHA
+489a  0A           ASL A             ; sprite index = enemy*2
+489b  AA           TAX
+489c  BD 02 D0     LDA $D002,X       ; check sub-cell alignment
+489f  29 0F        AND #$0F          ; not aligned -> just continue moving
+48a1  D0 0C        BNE $48AF
+48a3  BD 03 D0     LDA $D003,X
+48a6  29 0F        AND #$0F
+48a8  C9 02        CMP #$02
+48aa  D0 10        BNE $48BC
+48ac  4C C9 48     JMP $48C9         ; grid-aligned -> go to AI decision
+
+THE CHASE-OR-COAST GATE
+-----------------------
+48c9  8A           TXA
+48ca  48           PHA
+48cb  98           TYA
+48cc  48           PHA
+48cd  20 97 E0     JSR $E097         ; sprite drawing
+48d0  68           PLA
+48d1  A8           TAY
+48d2  68           PLA
+48d3  AA           TAX
+48d4  A5 8D        LDA $8D           ; <-- jiffy clock LSB (fast counter)
+48d6  CD 7F 0D     CMP $0D7F         ; <-- threshold (level-dependent)
+48d9  90 03        BCC $48DE         ; clock < threshold -> chase
+48db  4C 31 49     JMP $4931         ; otherwise -> continue current direction
+
+THE CHASE DECISION (player-seeking, one axis at a time)
+-------------------------------------------------------
+48de  A5 8E        LDA $8E           ; jiffy clock high byte
+48e0  29 01        AND #$01          ; coin-flip:
+48e2  F0 1B        BEQ $48FF         ;   0 -> prefer X axis, 1 -> prefer Y axis
+
+; --- Y-axis branch: move toward player vertically ---
+48e4  AD 01 D0     LDA $D001         ; player Y (sprite 0)
+48e7  DD 03 D0     CMP $D003,X       ; vs enemy Y
+48ea  B0 0B        BCS $48F7         ; player Y >= enemy Y -> try DOWN
+48ec  20 80 47     JSR $4780         ;   check UP passable
+48ef  D0 03        BNE $48F4         ;   blocked -> fallback
+48f1  4C 00 46     JMP $4600         ;   move UP
+48f4  4C 31 49     JMP $4931         ; fallback: continue current direction
+48f7  20 C0 47     JSR $47C0         ; check DOWN passable
+48fa  D0 F8        BNE $48F4         ; blocked -> fallback
+48fc  4C 60 46     JMP $4660         ; move DOWN
+
+; --- X-axis branch: move toward player horizontally ---
+48ff  AD 10 D0     LDA $D010         ; sprite X high-bit register
+4902  29 01        AND #$01
+4904  F0 20        BEQ $4926
+...
+490e  AD 00 D0     LDA $D000         ; player X (sprite 0)
+4911  DD 02 D0     CMP $D002,X       ; vs enemy X
+4914  B0 08        BCS $491E         ; -> try RIGHT
+4916  20 40 48     JSR $4840         ; check LEFT passable
+4919  D0 D9        BNE $48F4         ; blocked -> fallback
+491b  4C 20 47     JMP $4720         ; move LEFT
+491e  20 00 48     JSR $4800         ; check RIGHT passable
+4921  D0 D1        BNE $48F4         ; blocked -> fallback
+4923  4C C0 46     JMP $46C0         ; move RIGHT
+
+DIRECTION CHECK ROUTINES (passability tests, all share $44FC setup)
+-------------------------------------------------------------------
+$4780  = UP check     (subtracts $50 from screen pointer)
+$47C0  = DOWN check   (adds $50)
+$4800  = RIGHT check  (adds $02)
+$4840  = LEFT check   (subtracts $01)
+
+Each returns A=0 if target cell is empty space ($20 = passable),
+A=1 if blocked. State-2/3 enemies treat additional tile types
+($84/$85/$86/$88/$8B = stunned/cracking ice) as passable.
+
+Example - $4780 (UP check):
+4780  20 FC 44     JSR $44FC         ; compute screen pointer from sprite coords
+4783-4791  ...                       ; pointer -= $50 (2 rows up)
+4793  A0 28        LDY #$28          ; offset = 40 (one more row)
+4795  B1 49        LDA ($49),Y       ; read target tile
+4797  C9 20        CMP #$20          ; empty space?
+4799  D0 06        BNE $47A1
+479e  A9 00        LDA #$00          ;   -> passable
+47a0  60           RTS
+47a1  C9 88        CMP #$88          ; cracked-ice variants
+47a3  F0 12        BEQ $47B7
+47a5  C9 86        CMP #$86
+47a7  F0 0E        BEQ $47B7
+47ac  B9 80 0D     LDA $0D80,Y       ; state >= 2?
+47af  C9 02        CMP #$02
+47b1  F0 E8        BEQ $479B
+47b3  C9 03        CMP #$03
+47b5  F0 E4        BEQ $479B         ;   -> passable for state 2/3
+47ba  A9 01        LDA #$01          ; else blocked
+47bc  60           RTS
+
+MOVE-EXECUTE ROUTINES (commit the move)
+---------------------------------------
+$4600 = move UP        $4660 = move DOWN
+$46C0 = move RIGHT     $4720 = move LEFT
+
+Each calls $44FC for the screen-pointer math, then adjusts sprite
+coords by ±2 pixels and updates the stored direction in $0D84,Y.
+
+CONTINUE-CURRENT-DIRECTION FALLBACK ($4931)
+-------------------------------------------
+Reads only the enemy's own stored direction $0D84,Y and the enemy's
+own sprite coords. Does NOT read player position $D000/$D001.
+Just keeps gliding in the same direction.
+
+4931  B9 84 0D     LDA $0D84,Y       ; current direction (1..4)
+4934  C9 01        CMP #$01          ; up
+4936  D0 08        BNE $4940
+4938  20 80 47     JSR $4780         ;   passable upward?
+493b  D0 23        BNE $4960
+493d  4C 00 46     JMP $4600         ;   continue UP
+4940  C9 02        CMP #$02          ; down
+...                                  ; etc for all 4 directions
+                                     ; if blocked, falls into pick-new-direction
+                                     ; logic at $4960 onward
+                                     

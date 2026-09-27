@@ -1,0 +1,610 @@
+===============================================================================
+  C64 GAME — COMPLETE DISASSEMBLED CODE WITH ANNOTATIONS
+  Extracted from OGhidra AI analysis sessions (gemma4 + grok-4)
+===============================================================================
+
+
+===============================================================================
+  $0073 — BCD / DIGIT CONVERSION ROUTINE
+===============================================================================
+; Digit to BCD conversion routine: INC $7A/$7B (carry), load $0200,
+; check range, subtract offsets to get value.
+; Used for score/lives rendering (unpack BCD → ASCII).
+; CMP #$3A BCS pattern used to detect digit overflow.
+
+
+===============================================================================
+  $0900 — GAME INITIALIZATION
+===============================================================================
+; Game init: Set stack, SEI, init vars $8B=lives=3, $8C=2,
+; clear $53-55 (score), sprites, RAM banks, charset, copy charset.
+
+; Disable BASIC ROM:
+0945: A5 01       LDA $01          ; Load memory config register
+0947: 29 FB       AND #$FB         ; Clear bit 2 (disable BASIC ROM overlay)
+0949: 85 01       STA $01          ; Store back — RAM visible at $A000-$BFFF
+
+; Later re-enabled partially:
+; 0961: ORA #$04  (re-enable BASIC ROM bit, but no calls made)
+
+; Lives initialization:
+090C: A9 03       LDA #$03         ; 3 lives
+090E: 85 8B       STA $8B          ; Store in zero-page lives counter
+
+
+===============================================================================
+  $09B8 — CLEAR SCREEN AND SETUP
+===============================================================================
+; Main setup loop: Clear screen $0400-$07FF to $20 (space),
+; colors to $F1, set borders $D020/$D021 = $F0.
+
+
+===============================================================================
+  $09E0 / $09FA — DRAW INITIAL SLEEPING ENEMY ROWS
+===============================================================================
+; Draws 2 rows of sleeping enemies at the top of the screen.
+; Row 1: 6 enemies starting at $040B
+; Row 2: 7 enemies starting at $0459
+; Each enemy is a 2x2 character block rendered by JSR $0ABD.
+
+; --- Draw First Row (6 enemies) ---
+09FA: A2 06       LDX #$06         ; Loop counter = 6 enemies
+09FC: 86 3B       STX $3B
+09FE: A2 04       LDX #$04
+0A00: 86 3A       STX $3A          ; Screen ptr hi = $04
+0A02: A2 0B       LDX #$0B
+0A04: 86 39       STX $39          ; Screen ptr lo = $0B → $040B
+0A06: 20 BD 0A    JSR $0ABD        ; Render one sleeping enemy
+0A09: E6 39       INC $39          ; Advance pointer by 3 columns
+0A0B: E6 39       INC $39
+0A0D: E6 39       INC $39
+0A0F: C6 3B       DEC $3B          ; Decrement loop counter
+0A11: D0 F3       BNE $0A06        ; Loop until row done
+
+; --- Draw Second Row (7 enemies) ---
+0A13: A2 59       LDX #$59
+0A15: 86 39       STX $39          ; Screen ptr lo = $59 → $0459
+0A17: A2 07       LDX #$07         ; Loop counter = 7 enemies
+0A19: 86 3B       STX $3B
+0A1B: 20 BD 0A    JSR $0ABD        ; Render one sleeping enemy
+0A1E: E6 39       INC $39          ; Advance pointer by 3 columns
+0A20: E6 39       INC $39
+0A22: E6 39       INC $39
+0A24: C6 3B       DEC $3B
+0A26: D0 F3       BNE $0A1B        ; Loop until row done
+
+
+===============================================================================
+  $0ABD — RENDER SINGLE SLEEPING ENEMY (2×2 character block)
+===============================================================================
+; Writes characters $40/$41 (top row) and $42/$43 (bottom row)
+; to screen RAM at address pointed to by $39/$3A.
+
+0ABD: A0 00       LDY #$00
+0ABF: A9 40       LDA #$40         ; Top-left character
+0AC1: 91 39       STA ($39),Y
+0AC3: C8          INY
+0AC4: A9 41       LDA #$41         ; Top-right character
+0AC6: 91 39       STA ($39),Y
+0AC8: A9 42       LDA #$42         ; Bottom-left character
+0ACA: A0 28       LDY #$28         ; Offset +40 (next screen row)
+0ACC: 91 39       STA ($39),Y
+0ACE: C8          INY
+0ACF: A9 43       LDA #$43         ; Bottom-right character
+0AD1: 91 39       STA ($39),Y
+0AD3: 60          RTS
+
+
+===============================================================================
+  $0C7A — SCORE/STATE CALCULATION (gemma4 misidentified as PRNG)
+===============================================================================
+; 4× ROR A followed by AND #$0F mask. Used for score/display math,
+; NOT a pseudo-random number generator.
+
+0C7B: 6A          ROR A
+0C7C: 6A          ROR A
+0C7D: 6A          ROR A
+0C7E: 6A          ROR A
+; Falls through to:
+0C83: 29 0F       AND #$0F         ; Mask lower nibble
+
+
+===============================================================================
+  $0C8D — MAIN GAME LOOP
+===============================================================================
+; Infinite main game loop: Handle input ($CBD), enemy scan ($D17),
+; bullet ($D8F), vulture spawn/update ($E3F/$EDF),
+; raster IRQ check, sound, etc.
+
+0C8D: A2 FF       LDX #$FF
+0C8F: 9A          TXS              ; Reset stack pointer
+0C90: 20 BD 0C    JSR $0CBD        ; Poll joystick input
+0C93: 20 17 0D    JSR $0D17        ; Scan/move sleeping enemies, count into $3B
+0C96: A5 3B       LDA $3B          ; Load enemy count
+0C98: D0 03       BNE $0C9D        ; If enemies remain, continue
+0C9A: 4C 48 11    JMP $1148        ; NO ENEMIES LEFT → level clear!
+; ...
+0CA4: 20 3F 0E    JSR $0E3F        ; Vulture spawn/init logic
+0CA7: 20 DF 0E    JSR $0EDF        ; Vulture movement, bullet drop, collision
+; ...
+0CBA: 4C 8D 0C    JMP $0C8D        ; Loop forever
+
+
+===============================================================================
+  $0CBD — JOYSTICK HANDLER (handle_joystick_input)
+===============================================================================
+; Read joystick: CIA1 $DC00 Port A.
+; Timer-gated (~128 frames via $56).
+; Horizontal: AND #$0C → $04=right (INC $D000 ×2), $08=left (DEC, clamp >$2B).
+; Fire: AND #$70 == $60 → set bullet ($58=7, $57=start pos).
+
+0CBD: C6 56       DEC $56          ; Decrement poll timer
+0CBF: F0 01       BEQ $0CC2        ; Branch if timer expired
+0CC1: 60          RTS              ; Early exit — not time to poll yet
+
+0CC2: A9 80       LDA #$80         ; Reset 128-frame poll timer
+0CC4: 85 56       STA $56
+
+0CC6: AD 00 DC    LDA $DC00        ; Read joystick CIA1 Port A
+0CC9: 29 0C       AND #$0C         ; Mask bits 2-3 (horizontal direction)
+0CCB: C9 04       CMP #$04         ; Right?
+0CCD: D0 12       BNE $0CE1        ; No → check left
+0CCF: EE 00 D0    INC $D000        ; Player sprite 0 X += 1
+0CD2: D0 03       BNE $0CD7        ; Always branch (skip overflow)
+0CD7: EE 00 D0    INC $D000        ; X += 1 again (double speed move right)
+0CDA: D0 03       BNE $0CDF        ; Always branch
+0CDF: D0 12       BNE $0CF3        ; Continue to fire check
+
+0CE1: C9 08       CMP #$08         ; Left?
+0CE3: D0 0E       BNE $0CF3        ; No → skip to fire check
+0CE5: AD 00 D0    LDA $D000        ; Load current player X
+0CE8: C9 2B       CMP #$2B         ; At left screen edge ($2B)?
+0CEA: B0 01       BCS $0CED        ; No → allow move left
+0CEC: 60          RTS              ; Too far left → exit
+
+0CED: 18          CLC
+0CEE: E9 01       SBC #$01         ; X -= 1
+0CF0: 8D 00 D0    STA $D000        ; Update player X position
+
+; --- Fire button check ---
+0CF3: AD 00 DC    LDA $DC00        ; Re-read joystick
+0CF6: 29 70       AND #$70         ; Mask bits 4-6 (UP/DOWN/LEFT)
+0CF8: C9 60       CMP #$60         ; == $60 (fire condition)?
+0CFA: F0 01       BEQ $0CFD        ; Yes → fire!
+0CFC: 60          RTS              ; No → done
+
+0CFD: A5 58       LDA $58          ; Fire cooldown active?
+0CFF: F0 01       BEQ $0D02        ; No → proceed to fire
+0D01: 60          RTS              ; Yes → ignore (still cooling down)
+
+0D02: A2 07       LDX #$07         ; Cooldown value = 7
+0D04: 86 58       STX $58          ; Set fire timer
+0D06: A9 20       LDA #$20         ; Default bullet Y offset
+0D08: 85 57       STA $57          ; Bullet start Y base
+0D0A: AD 00 D0    LDA $D000        ; Player X
+0D0D: 18          CLC
+0D0E: E9 07       SBC #$07         ; X - 7 (bullet offset left of player center)
+0D10: 90 04       BCC $0D16        ; Underflow? → use default $20
+0D12: E6 57       INC $57          ; Adjust bullet Y
+0D14: D0 F7       BNE $0D0D        ; Loop until stable
+0D16: 60          RTS
+
+
+===============================================================================
+  $0D17 — ENEMY SCAN + MOVEMENT (update_sleeping_enemies)
+===============================================================================
+; Previously mislabeled as "handle_player_movement" in Ghidra.
+; Actually: scans screen $0406-$04FF for $40 chars (sleeping enemies),
+; counts them into $3B, and randomly moves them left/right using
+; raster line $D012 as pseudo-random source.
+
+; Timer gate:
+; DEC $5D; if not zero, set $3B=3 and exit (prevent false "level clear").
+; When $5D expires: set $3B=0 and begin full screen scan.
+
+; --- Screen scanning loop ---
+0D2C: A0 00       LDY #$00
+0D2E: B1 39       LDA ($39),Y      ; Read character from screen RAM
+0D30: C9 40       CMP #$40         ; Is it $40 (top-left of sleeping enemy)?
+0D32: F0 0D       BEQ $0D41        ; Yes → go to movement logic
+0D34: E6 39       INC $39          ; No → advance to next screen address
+0D36: D0 02       BNE $0D3A
+0D38: E6 3A       INC $3A
+0D3A: A5 3A       LDA $3A
+0D3C: C9 05       CMP #$05         ; Past $04FF? (end of scan range)
+0D3E: 90 EC       BCC $0D2C        ; No → continue scanning
+
+; --- Enemy found: pseudo-random movement decision ---
+0D41: AD 12 D0    LDA $D012        ; Read VIC-II raster line (pseudo-random)
+0D44: E6 3B       INC $3B          ; Increment enemy count
+0D46: C9 DC       CMP #$DC         ; Raster >= $DC?
+0D48: 90 EA       BCC $0D34        ; No → skip movement, continue scan
+0D4A: 29 0F       AND #$0F         ; Mask lower 4 bits
+0D4C: C9 08       CMP #$08         ; 50/50 chance
+0D4E: 90 18       BCC $0D68        ; < 8 → move left
+
+; --- Move Right ---
+0D50: C8          INY
+0D51: C8          INY
+0D52: B1 39       LDA ($39),Y      ; Check space to the right
+0D54: C9 20       CMP #$20         ; Is it empty (space char)?
+0D56: D0 DC       BNE $0D34        ; Not empty → abort, continue scan
+0D58: A0 00       LDY #$00         ; Erase old top-left
+0D5A: 91 39       STA ($39),Y
+0D5C: A0 28       LDY #$28         ; Erase old bottom-left (next row)
+0D5E: 91 39       STA ($39),Y
+0D60: E6 39       INC $39          ; Move pointer right by 1
+0D62: 20 BD 0A    JSR $0ABD        ; Redraw enemy at new position
+
+; --- Move Left ---
+0D68: ; (symmetric logic: check left space is $20, erase right tiles,
+      ;  DEC $39, JSR $0ABD to redraw)
+
+
+===============================================================================
+  $0D8F — BULLET MOVEMENT + COLLISION (handle_bullet_movement)
+===============================================================================
+; Bullet movement: DEC $59 timer, if $58!=0 move $57 ptr upward,
+; check screen content for enemy tiles ($42/$43), explode on hit,
+; INC score $54 (BCD).
+
+; --- Collision detection with sleeping enemies ---
+0DBE: C9 42       CMP #$42         ; Hit bottom-left of enemy?
+0DC0: F0 11       BEQ $0DD3        ; Yes → jump to removal logic
+0DC2: C9 43       CMP #$43         ; Hit bottom-right of enemy?
+0DC4: D0 F3       BNE $0DB9        ; Neither → clear bullet and exit
+
+; --- Pointer alignment (hit $43 → adjust to $42 position) ---
+0DC6: 38          SEC
+0DC7: A5 57       LDA $57
+0DC9: E9 01       SBC #$01         ; Subtract 1 from bullet screen ptr lo
+0DCB: 85 57       STA $57
+0DCD: A5 58       LDA $58
+0DCF: E9 00       SBC #$00         ; Borrow into hi byte
+0DD1: 85 58       STA $58          ; Pointer now at $42 position
+
+; Then JSR $0D81 subtracts $28 (40 = one screen row width)
+; → pointer now at top-left ($40) of the 2×2 enemy block.
+
+; --- Explosion animation ($0DE0–$0E12) ---
+; Cycles through all 4 character positions of the enemy:
+; Y=0 (top-left), Y=1 (top-right), Y=$28 (bottom-left), Y=$29 (bottom-right)
+; For each position, loops 32 times writing chars $00–$20 (flicker effect).
+; Final value $20 = space → enemy visually erased.
+
+0DE0: A2 00       LDX #$00         ; Start animation frame at 0
+0DE2: A0 00       LDY #$00         ; Y=0 (top-left character position)
+0DE4: 8A          TXA
+0DE5: 91 57       STA ($57),Y      ; Write frame X to screen memory
+0DE7: 20 2E 0E    JSR $0E2E        ; Short delay loop
+0DEA: E8          INX              ; Next frame
+0DEB: E0 21       CPX #$21         ; Loop until X reaches $21 (33 iterations)
+0DED: D0 F5       BNE $0DE4
+; Repeated for Y=1, Y=$28, Y=$29 (top-right, bottom-left, bottom-right)
+
+; --- Score update + cleanup ($0E14–$0E2A) ---
+0E14: F8          SED              ; Set Decimal Mode (BCD math)
+0E15: 18          CLC
+0E16: A5 54       LDA $54
+0E18: 69 01       ADC #$01         ; Add 1 to score low byte (BCD)
+0E1A: 85 54       STA $54
+; ... (carry to $53 hi byte if needed)
+0E22: D8          CLD              ; Clear Decimal Mode
+0E23: A9 00       LDA #$00
+0E25: 85 58       STA $58          ; Deactivate bullet (flag = 0)
+0E27: 20 64 0C    JSR $0C64        ; Update score display on screen
+0E2A: 4C 7A 0C    JMP $0C7A        ; Return to main game loop
+
+
+===============================================================================
+  $0E3F — VULTURE SPAWN (spawn_vulture)
+===============================================================================
+; Vulture spawn: if $5B and $5A both zero and timer $60 expires,
+; spawn Sprite 4 at X=4, Y=$30 (top-left area).
+; Init direction ($5A=down, $5B=toward player), timers, enable sprite.
+
+0E3F: A5 5B       LDA $5B          ; If $5B != 0 (vulture active?), skip
+0E41: F0 01       BEQ $0E44
+0E43: 60          RTS
+
+0E44: A5 5A       LDA $5A          ; If $5A != 0, skip
+0E46: F0 01       BEQ $0E49
+; (implicit: 0E48: 60 RTS)
+
+0E49: C6 60       DEC $60          ; Vulture spawn countdown timer
+0E4B: F0 01       BEQ $0E4E
+0E4D: 60          RTS              ; Timer not expired yet
+
+0E4E: A9 00       LDA #$00         ; Reset variables
+0E50: 85 66       STA $66          ; Clear sound/RNG accumulator
+0E52: 85 39       STA $39          ; Clear screen pointer lo
+0E54: A9 04       LDA #$04
+0E56: 85 3A       STA $3A          ; Screen pointer hi = $04
+0E58: 8D 08 D0    STA $D008        ; Sprite 4 X = 4 (far left)
+
+0E5B: A9 30       LDA #$30
+0E5D: 8D 09 D0    STA $D009        ; Sprite 4 Y = $30 (48 pixels, near top)
+
+0E60: A9 08       LDA #$08
+0E62: 85 64       STA $64          ; V-step timer lo = 8
+0E64: 85 65       STA $65          ; V-step timer hi = 8
+
+; [... screen clear loop: scans for $40 marker to pick spawn point ...]
+
+0EA0: A9 02       LDA #$02         ; Direction = down
+0EA2: 85 5A       STA $5A
+
+0EA4: AD 00 D0    LDA $D000        ; Player X position
+0EA7: CD 08 D0    CMP $D008        ; Compare to vulture X
+0EAA: 90 04       BCC $0EB0        ; If player is left of vulture
+0EAC: A9 02       LDA #$02         ; → chase right ($5B = 2)
+0EAE: D0 02       BNE $0EB2
+0EB0: A9 00       LDA #$00         ; → chase left ($5B = 0)
+0EB2: 85 5B       STA $5B          ; Store horizontal direction
+
+0EB4: A9 CE       LDA #$CE
+0EB6: 8D FC 07    STA $07FC        ; Score/display marker
+
+0EB9: A9 40       LDA #$40
+0EBB: 85 5F       STA $5F          ; H-step reload value = 64
+0EBD: 85 5E       STA $5E          ; H-step timer = 64
+
+0EBF: A9 32       LDA #$32
+0EC1: 85 63       STA $63          ; Bottom Y limit = $32
+
+0EC3: AD 15 D0    LDA $D015        ; Load sprite enable register
+0EC6: 09 10       ORA #$10         ; Set bit 4 (enable Sprite 4)
+0EC8: 8D 15 D0    STA $D015        ; Vulture now visible
+
+; [... raster sync code ...]
+
+
+===============================================================================
+  $0EDF — VULTURE MOVEMENT, BULLET DROP, COLLISION (update_vulture_movement)
+===============================================================================
+; Vulture update: DEC $5C timer, move Y/X based on $5A/$5B direction
+; (signed: negative=up/left, positive=down/right).
+; Drops bullet (Sprite 5) when aligned with player.
+; Detects collision → player death ("grab").
+
+0EDF: A5 5B       LDA $5B          ; Check if vulture active
+0EE1: D0 01       BNE $0EE4        ; If $5B != 0 → active, continue
+0EE3: 60          RTS              ; Inactive → exit
+
+0EE4: 20 92 13    JSR $1392        ; Vulture sound effect
+
+0EE7: C6 5C       DEC $5C          ; Frame counter
+0EE9: F0 01       BEQ $0EEC        ; Timer expired → process movement
+0EEB: 60          RTS              ; Not yet → exit
+
+; [... $5C reset, score blink based on Y bit5 ...]
+
+; --- Horizontal re-targeting (periodic) ---
+0F02: C6 5E       DEC $5E          ; H-step timer
+0F04: D0 16       BNE $0F1C        ; Not expired → skip re-target
+0F06: A5 5F       LDA $5F
+0F08: 85 5E       STA $5E          ; Reload H-step timer
+
+0F0A: AD 00 D0    LDA $D000        ; Player X
+0F0D: CD 08 D0    CMP $D008        ; vs Vulture X
+0F10: 90 06       BCC $0F18        ; Player left of vulture?
+0F12: A9 02       LDA #$02         ; No → chase right
+0F14: 85 5B       STA $5B
+0F16: D0 04       BNE $0F1C
+0F18: A9 FE       LDA #$FE         ; Yes → chase left
+0F1A: 85 5B       STA $5B
+
+; --- Vertical movement ---
+0F1C: A5 5A       LDA $5A          ; V-direction flag (signed)
+0F1E: 10 18       BPL $0F38        ; >= 0 → descend
+
+; --- Ascend (V-dir negative) ---
+0F20: CE 09 D0    DEC $D009        ; Sprite 4 Y -= 1 (move up)
+0F23: AD 09 D0    LDA $D009
+0F26: C5 63       CMP $63          ; Hit top limit?
+0F28: B0 34       BCS $0F5E        ; No → continue
+
+0F2A: EE 09 D0    INC $D009        ; Yes → bounce back down
+0F2D: C6 5F       DEC $5F          ; Speed adjustment
+0F2F: D0 02       BNE $0F33
+0F33: 20 24 10    JSR $1024        ; Flip V-direction ($5A ^= $FF)
+0F36: D0 26       BNE $0F5E
+
+; --- Descend (V-dir positive) ---
+0F38: C6 64       DEC $64          ; Descend step timer
+0F3A: D0 22       BNE $0F5E        ; Not expired → skip
+; [... reload $64 from $65, INC $D009 (move down), flip at Y=$E0 ...]
+
+; --- Horizontal movement ---
+0F5E: A5 5B       LDA $5B          ; H-direction flag (signed)
+0F60: 10 0F       BPL $0F71        ; >= 0 → move right
+
+; --- Move left ---
+0F62: CE 08 D0    DEC $D008        ; Sprite 4 X -= 1
+0F65: AD 08 D0    LDA $D008
+0F68: C9 18       CMP #$18         ; Hit left edge ($18)?
+0F6A: B0 10       BCS $0F7C        ; No → continue
+0F6C: 20 1D 10    JSR $101D        ; Yes → flip H-direction ($5B ^= $FF)
+0F6F: D0 0B       BNE $0F7C
+
+; --- Move right ---
+0F71: EE 08 D0    INC $D008        ; Sprite 4 X += 1
+; [... edge wrap check ...]
+
+; --- Bullet drop conditions ---
+0F7C: AE 09 D0    LDX $D009        ; Vulture Y
+0F7F: AD 1F D0    LDA $D01F        ; Sprite-sprite collision register
+0F82: E0 55       CPX #$55         ; Vulture Y < 85 (upper half)?
+0F84: B0 3A       BCS $0FC0        ; No → check grab/death collision
+
+0F86: AD 08 D0    LDA $D008        ; Vulture X
+0F89: CD 00 D0    CMP $D000        ; == Player X?
+0F8C: F0 01       BEQ $0F8F        ; Yes → may drop bullet
+0F8E: 60          RTS              ; No → exit
+
+0F8F: AD 0B D0    LDA $D00B        ; Vulture bullet (Sprite 5) Y
+0F92: F0 01       BEQ $0F95        ; == 0 (inactive)? → drop new bullet
+0F94: 60          RTS              ; Bullet already active → exit
+
+0F95: AD 08 D0    LDA $D008        ; Set bullet X = vulture X
+0F98: 8D 0A D0    STA $D00A
+0F9B: AD 09 D0    LDA $D009        ; Vulture Y
+0F9E: C9 A0       CMP #$A0         ; Y too low (> $A0)?
+0FA0: 90 01       BCC $0FA3        ; No → proceed
+0FA2: 60          RTS              ; Yes → don't drop
+
+0FA3: 18          CLC
+0FA4: 69 13       ADC #$13         ; Bullet Y = vulture Y + 19 (below vulture)
+0FA6: 8D 0B D0    STA $D00B
+; [... enable Sprite 5: $D015 |= $20, set color $D02C, timer $61 = $35 ...]
+
+; --- Grab/Death collision check ---
+0FC0: 29 10       AND #$10         ; $D01F bit 4 (Sprite 0 vs Sprite 4)
+0FC2: C9 10       CMP #$10
+0FC4: D0 C0       BNE $0F86        ; No collision → back to bullet check
+; [... death sequence: sounds off, delays, BCD INC $54 (score),
+;      reset sprites/player/vulture, flow to $113E ...]
+
+
+===============================================================================
+  $101D — FLIP VULTURE HORIZONTAL DIRECTION
+===============================================================================
+101D: A5 5B       LDA $5B          ; Load H-direction
+101F: 49 FF       EOR #$FF         ; Invert all bits (flip sign)
+1021: 85 5B       STA $5B
+1023: 60          RTS
+
+
+===============================================================================
+  $1024 — FLIP VULTURE VERTICAL DIRECTION
+===============================================================================
+1024: A5 5A       LDA $5A          ; Load V-direction
+1026: 49 FF       EOR #$FF         ; Invert all bits (flip sign)
+1028: 85 5A       STA $5A
+102A: 60          RTS
+
+
+===============================================================================
+  $102B — VULTURE BULLET UPDATE (update_player_bullet)
+===============================================================================
+; Moves vulture bullet (Sprite 5) downward.
+; Timer $61 controls speed (reload $35 = 53 frames between steps).
+
+102B: C6 61       DEC $61          ; Bullet movement timer
+102D: F0 01       BEQ $1030        ; Expired → move bullet
+102F: 60          RTS              ; Not yet → exit
+
+1030: A9 35       LDA #$35         ; Reset timer to 53
+1032: 85 61       STA $61
+
+1034: AE 0B D0    LDX $D00B        ; Load bullet Y (Sprite 5)
+1037: D0 01       BNE $103A        ; If Y != 0 → move
+1039: 60          RTS              ; Y == 0 → inactive, exit
+
+103A: E8          INX              ; Y += 1 (move down)
+103B: F0 04       BEQ $1041        ; Wrapped to 0? → offscreen, disable
+103D: 8E 0B D0    STX $D00B        ; Update Sprite 5 Y
+1040: 60          RTS
+
+1041: ; [... disable Sprite 5: $D015 &= ~$20, reset $D00B = 0 ...]
+
+
+===============================================================================
+  $1052 — PLAYER DEATH HANDLER
+===============================================================================
+; Triggered by sprite-sprite collision ($D01E bit 0 = player hit).
+; Death flow:
+;   1. Check collision type (if X == $11, skip to $1081)
+;   2. Play death sound (JSR $13A5)
+;   3. Copy player pos ($D000/$D001) to other sprite regs
+;   4. Set flags: $5A = $FE, flip $5B, disable sprites ($D015 = 0)
+;   5. Animation/sound loops
+;   6. Clear screen areas via $57/$58 pointer
+;   7. BCD increment score ($54 += 1/2)
+;   8. Delay loops, sounds
+;   9. Loop until $5C reaches $25 (~37 frames)
+;  10. Restore positions, re-enable sprites ($D015 |= $3C)
+;  11. Reset vars ($63=0, $66=0)
+;  12. Fall through to $113E (decrement lives)
+
+
+===============================================================================
+  $113E — LIVES DECREMENT (ON DEATH)
+===============================================================================
+; On player death (vulture grab complete or collision):
+; DEC $8B (lives), if zero → game over (restart init).
+; Else JMP $0A4F (respawn, continue level).
+
+113E: C6 8B       DEC $8B          ; Lives -= 1
+1140: F0 03       BEQ $1145        ; If zero → game over
+1142: 4C 4F 0A    JMP $0A4F        ; Respawn player, continue level
+
+1145: ; [... game over → restart initialization ...]
+
+
+===============================================================================
+  $1148 — LEVEL CLEAR ROUTINE
+===============================================================================
+; Entered when $3B == 0 (no enemies remain on screen).
+;   - Reset stack pointer (TXS)
+;   - Play level-clear sounds (JSR $13A5, JSR $1320)
+;   - INC $8C (level counter)
+;   - Screen flash via VIC-II ($D015 sprites, $D010)
+;   - Loop back to game init for next stage
+
+
+===============================================================================
+  $143A — RENDER LIVES DISPLAY (render_lives)
+===============================================================================
+; Render lives: copy icon table → $04E9/$D8E9 (status bar),
+; then convert $8B to ASCII digit at $04EC (upper-right screen).
+; Displays (lives - 1) — e.g., 3 lives → shows '2' (reserve lives).
+
+; $143A–$144B: Copy status icon/label table → screen $04E9 + color $D8E9
+; $144E–$1451:
+144E: A6 8B       LDX $8B          ; Load lives count
+1450: E8          INX              ; lives + 1
+1451: 8E EC D8    STX $D8EC        ; Store as color at $D8EC
+; $1454–$145A:
+1454: CA          DEX              ; lives + 1 - 1 = lives
+1455: CA          DEX              ; lives - 1
+1456: 8A          TXA              ; Transfer to A
+1457: 69 30       ADC #$30         ; Add $30 → ASCII digit ('0'==$30)
+1459: 8D EC 04    STA $04EC        ; Write digit to screen (row 4, col 12)
+
+
+===============================================================================
+  $1313 — SOUND DRIVER 1 (also increments pseudo-RNG $66)
+===============================================================================
+; DEC $67; if zero, reload $67 = 10 ($0A), INC $66.
+; LDA $66 → SID register $D401 (voice 1 frequency hi).
+; Called frequently: death sequences, main loop.
+
+
+===============================================================================
+  $1392 — SOUND DRIVER 2 (also increments pseudo-RNG $66)
+===============================================================================
+; DEC $67; if zero, reload $67 = 3, INC $66.
+; If $66 overflows (< 0), reset to $80.
+; LDA $66 → SID register $D408 (voice 2 frequency hi).
+; Called for vulture sounds and main loop.
+
+
+===============================================================================
+  $1657 / $1687 — INPUT INIT + KERNAL CALLS
+===============================================================================
+; Called from game entry at $0907 for title screen / initial input.
+
+1687: 20 9F FF    JSR $FF9F        ; KERNAL: scan routine (CIA/keyboard setup)
+168A: 20 E4 FF    JSR $FFE4        ; KERNAL GETIN: non-blocking keyboard read
+; Used for title screen text entry (player initials at $08E0).
+
+
+===============================================================================
+  $20C5 — TITLE SCREEN: START GAME ON FIRE BUTTON
+===============================================================================
+20C5: AD 00 DC    LDA $DC00        ; Read joystick
+20C8: 29 70       AND #$70         ; Mask bits 4-6
+20CA: C9 60       CMP #$60         ; Fire button condition
+20CC: D0 03       BNE $20D1        ; Not pressed → loop
+20CE: 4C 07 09    JMP $0907        ; Fire pressed → start game!

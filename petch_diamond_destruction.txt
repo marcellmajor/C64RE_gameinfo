@@ -1,0 +1,54 @@
+Diamond destruction check chain
+
+  $39FA — Erase ice block (called when a regular ice block is destroyed):
+  $39FA: LDA #$20            ; space char
+  $39FC: STA ($49),Y         ; clear 2×2 cell at the carve ptr
+  $39FE: INY / STA ($49),Y
+  $3A01: LDY #$28 / STA ($49),Y
+  $3A05: INY / STA ($49),Y
+  $3A08: JMP $6040           ; ← then check if that cell was a diamond
+
+  $6040 — Diamond-position match (THE CHECK):
+  $6040: TXA / PHA
+  $6042: LDX #$00
+  $6044: LDA $49             ; just-erased screen ptr lo
+  $6046: CMP $0D00,X         ; diamond[X].lo
+  $6049: BNE $6052           ; mismatch → try next
+  $604B: JSR $60CA           ; load diamond[X] hi  (= $0D04,X - #$D4)
+  $604E: CMP $4A             ; vs ptr hi
+  $6050: BEQ $605C           ; HIT — diamond destroyed
+  $6052: INX / CPX #$04 / BNE $6044     ; iterate over the 4 diamond slots
+  $6057: PLA / TAX / JMP $39F2          ; no diamond here, regular ice
+  $605C: LDA #$01
+  $605E: JSR $14B5           ; arm destruction
+
+  The 4 diamonds live in two parallel tables: $0D00..$0D03 (ptr lo) and $0D04..$0D07 (ptr hi minus $D4).
+
+  $14B5 — Gate by alive flag:
+  $14B5: LDA $0D10,X         ; diamond[X].alive ?
+  $14B8: BNE $14BF           ; alive → trigger
+  $14BA: PLA / PLA / JMP $6057   ; dead → unwind 2 levels, ignore
+  $14BF: LDA #$01 / JMP $5E0D    ; arm animation + sound
+
+  $5E0D — Arm animation:
+  $5E0D: LDA #$1C / STA $7C02    ; SFX
+  $5E12: LDA #$01
+  $5E14: STA $0D15               ; animation trigger flag
+  $5E17: STA $7C01 / STA $7C00   ; SFX
+  $5E1D: RTS
+
+  $42CB — Per-frame animation state machine (main loop $1053):
+  $42CB: LDA $0D15 / BNE $42D1 / RTS    ; gate
+  $42D1: LDA $07FD                       ; sprite #5 frame
+          $3A → $3B → $8F → $DF
+  $42F1: LDA #$20 / JSR $439F            ; on last transition: +800
+  $42F7: JMP $4391                       ; clear $0D15, hide sprite 5
+
+  $439F — +800 entry:
+  $439F: STA $0D16
+  $43A2: LDY #$08
+  $43A4: JMP $5300                ; add 8*100 = 800 to current player
+
+  So the actual "did the player destroy a diamond?" check is $6040 — it's reached unconditionally after the normal ice-clear at $3A08: JMP $6040, and it scans the 4-entry diamond table ($0D00..$0D03 / $0D04..$0D07) against
+   the just-erased cell's screen pointer. A match (and $0D10,X != 0) triggers the destruction animation that ultimately awards +800 at $439F.
+   

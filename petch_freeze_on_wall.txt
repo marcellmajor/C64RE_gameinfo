@@ -1,0 +1,64 @@
+Yes — the freeze-on-wall mechanic exists in the binary
+
+  The dispatcher: $1E00 — when the player presses against a tile, this routine reads the facing tile's character at ($49),Y and looks for the wall char $88 (and variants $82/$86). On match, it routes to a per-direction
+  stun handler:
+
+  ┌──────────────────┬────────────────┬────────────────────┬───────────────────┐
+  │ Player direction │ Color sentinel │     Wall test      │   Stun handler    │
+  ├──────────────────┼────────────────┼────────────────────┼───────────────────┤
+  │ UP               │ $0E            │ CMP #$88 @ $1E4C   │ JMP $5800 @ $1E50 │
+  ├──────────────────┼────────────────┼────────────────────┼───────────────────┤
+  │ DOWN             │ $0D            │ (similar @ ~$1EBD) │ JMP $5837 @ $1EC1 │
+  ├──────────────────┼────────────────┼────────────────────┼───────────────────┤
+  │ LEFT             │ $0B            │ (similar @ ~$1F2E) │ JMP $586E @ $1F32 │
+  ├──────────────────┼────────────────┼────────────────────┼───────────────────┤
+  │ RIGHT            │ $07            │ (similar @ ~$1F9F) │ JMP $58AD @ $1FA3 │
+  └──────────────────┴────────────────┴────────────────────┴───────────────────┘
+
+  The stun handler — $5800 (UP variant):
+  $5800: LDA #$01 / STA $0DB0          ; direction marker = UP
+  $5805: LDA #$05 / STA $0DB1          ; (counter)
+  $580A: LDX #$00
+  $580C: LDA $0D80,X                   ; enemy[X].state
+  $580F: CMP #$01 BEQ $581D            ; alive walking
+  $5813: CMP #$02 BEQ $581D            ; or alive chasing
+  $5817: INX / CPX #$04 / BNE $580C    ; iterate 4 enemies
+  $581C: RTS
+  $581D: TXA / PHA / ASL A / TAX       ; sprite index = enemy*2
+  $5821: LDA $D003,X                   ; sprite Y of this enemy
+  $5824: CMP #$52                      ; top-edge Y threshold
+  $5826: BEQ $582D                     ; AT the same wall → freeze!
+  $5828: PLA / TAX / JMP $5817         ; not at edge → next enemy
+  $582D: PLA / TAX
+  $582F: LDA #$09                      ; STUNNED state
+  $5831: JSR $58EC                     ; apply
+
+  The apply primitive — $58EC:
+  $58EC: STA $0D80,X        ; enemy[X].state = $09 (STUNNED)
+  $58EF: LDA #$30
+  $58F1: STA $0DB8,X        ; enemy[X].stunTimer = 48 frames
+  $58F4: RTS
+
+  Edge thresholds checked per direction:
+  - UP: sprite Y == $52 (top row)
+  - DOWN: sprite Y == $E2 ($585B)
+  - LEFT/RIGHT ($5837+/$58AD+): tests $D010 X-MSB ANDed with $4FF0,X mask, then sprite X == $20
+
+  So the freeze only affects enemies that are themselves up against the SAME wall edge as the player — same as Pengo's wall-shake.
+
+  About fire+direction
+
+  The $1E00 dispatcher is gated upstream at $1903:
+  $1903: LDA $0FFF / AND #$10 / BNE $190D    ; bit-4 clear → $1E00 (stun path)
+  $190A: JMP $1E00                            ; otherwise → $1910 (normal destroy)
+
+  $0FFF is the action-state byte. Bit $10 distinguishes "push action" (normal ice destroy via $1910) from "kick action" (wall-stun via $1E00) — exactly the Pengo fire/no-fire split. I've armed a non-stopping checkpoint on
+  $5800–$58FF so you can verify it fires in-game by walking into a maze border with the fire button held.
+
+  Caveat: I couldn't locate the immediate JSR/JMP into $1903 — it may be reached via fall-through from a code path I haven't traced, or that branch may be partially dormant in this build. The $5800 family is real,
+  structurally correct Pengo-style stun code; the breakpoint will confirm whether it actually executes.
+
+✻ Crunched for 6m 43s
+
+※ recap: Reverse-engineering PETCH (C64 Pengo clone): traced the diamond-destroy +800 score path and located the wall-stun freeze code at $5800/$5837/$586E/$58AD, gated by fire bit at $1903. Next: have you play with fire
+  held against a maze border to confirm the $5800 breakpoint fires. (disable recaps in /config)

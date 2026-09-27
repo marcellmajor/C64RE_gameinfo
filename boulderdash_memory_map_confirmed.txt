@@ -1,0 +1,163 @@
+Boulder Dash (C64) - Runtime memory map: CONFIRMED FACTS ONLY
+=============================================================
+Found with the VICE MCP (live memory reads + disassembly) and
+asm_dir/boulderdash_unique.asm. Date: 2026-09-26.
+Everything here was either read from live memory or follows directly from
+the code. Inferred or unverified items are left out on purpose.
+Note: all behaviour comes from reading code and one-off memory reads;
+nothing was checked with breakpoints or by stepping the emulator.
+
+
+BANKING AND VIDEO
+-----------------
+  $01 (CPU port)       $36: BASIC ROM off, KERNAL and I/O on
+  $DD00                $97: VIC bank 0 ($0000-$3FFF)
+  $0314/$0315          IRQ vector -> $8A0C
+  $FFFA                NMI vector -> $FE43
+  Raster IRQ $8A0C     Acks $D019, then alternates two sets of VIC settings
+                       held in zero page, selected by $A7 (0/1):
+                         $D011 <- $54,X   $D016 <- $56,X
+                         $D018 <- $58,X   $D012 <- $5A,X
+                       Then polls the keyboard through CIA1 ($DC00/$DC01).
+  Live set values      set 0: $D011=$17 $D016=$15 $D018=$BC $D012=$28
+                       set 1: $D011=$1B $D016=$18 $D018=$38 $D012=$3B
+  Sprites              $D015=$7F (sprites 0-6 on), all Y=58,
+                       sprite pointers at $0FF8 = $DE
+
+
+RAM LAYOUT
+----------
+  $0000-$00FF  Zero-page game state (see below)
+  $0100-$01FF  Stack
+  $0850-$0BBF  CAVE MAP: 40 x 22 bytes, one tile ID per byte, row-major.
+               address(row,col) = $0850 + row*40 + col.
+               The game logic runs on this map; the scan loop walks all of
+               it every pass, whatever part is on screen.
+  $0C00-$0FE7  Screen matrix (sprite pointers at $0FF8)
+  $2401        Amoeba slow-growth time for the current cave
+               (compared with $AF; $8C in the running cave)
+  $2420+       Cave object list read by the cave decoder $8518,
+               terminated by $FF; object code $25 sets the player start
+               ($44/$45 from the next 2 bytes)
+  $2Exx        Written by the unrolled copy code at $9Exx
+               (e.g. $9E7A: LDA $4C0D,X / STA $2ED0,X)
+  $4000+       Off-screen character buffer. Row addresses come from the
+               table at $53DA ($4003, $40A3, $4143, ... stride $A0 = 160
+               bytes per tile row). $704E writes a tile's characters here
+               at column*2; $76A9 writes 2x2 characters at offsets
+               0, 1, $50, $51 (80 characters per line).
+  $53DA        Row-address table into the $4000 buffer (22 entries)
+  $5EE8-$5F27  Post-pass table: "moved this frame" tile -> normal tile,
+               applied at $81AD after each cell:
+                 $0C-$0F -> $08-$0B   $11 -> $10   $13 -> $12
+                 $15 -> $14           $17 -> $16   $34-$37 -> $30-$33
+                 $39 -> $38           $3B -> $3A
+  $5F68-$5FE7  Tile -> handler table (2 bytes per tile ID)
+  $764F        Explosion / entrance stage table (tile, next tile pairs)
+  $7144        Direction offsets 28 01 2A 51 (left, up, right, down)
+  $7148        Direction offsets 51 28 01 2A (same four, rotated by one)
+  $7364        Amoeba neighbour offsets 01 28 2A 51 (up, left, right, down)
+  $9802        Amoeba tile counter for the current pass
+  $9803        Amoeba tile count from the previous pass (copied at $814F)
+  $9E00+       Unrolled copy code (LDA $4xxx,X / STA $2xxx,X)
+  $D000-$DFFF  I/O (CIA timers used as random source by $6E68)
+  $E000-$FFFF  KERNAL ROM
+
+
+CELL ADDRESSING
+---------------
+  $32/$33 points at the top-left neighbour of the current cell.
+  Handlers use ($32),Y with:
+    Y=$29 current   $01 up    $28 left   $2A right   $51 down
+    $00 / $02 / $50 / $52 diagonals
+  $7A65 sets $32/$33 = $084F at the start of each pass.
+
+
+TILE -> HANDLER ($5F68)
+-----------------------
+  $04       -> $70EC   (becomes $05 when $90 != 0)
+  $05, $25  -> $76DC
+  $08-$0B   -> $7172   firefly
+  $10       -> $76F8   boulder
+  $12       -> $7745   falling boulder
+  $14       -> $731F
+  $16       -> $729D
+  $1B-$24   -> $766B   explosion stages
+  $26-$28   -> $7688   stages ending in $38 (player)
+  $30-$33   -> $7245   butterfly
+  $38       -> $762C   player
+  $3A       -> $7368   amoeba
+  All other tiles: no handler.
+
+Tiles seen in the live map: $00 empty, $01 dirt, $02 wall, $07 border,
+$10 boulder, $14 diamond, $30-$33 butterfly, $38 player, $3A amoeba.
+$07 is never overwritten by explosions ($70AE CMP #$07).
+
+
+CODE ROUTINES
+-------------
+  $6E68        Random number: $DC04 ^ $DC05 ^ $DD04 + $DD05 ^ $DD06 ^ $DD07
+  $704E        Write tile A to ($32),Y and update its characters
+  $706F        Clear the current cell ($29) to $00, return to the scan loop
+  $70AE        Write $89 to one cell unless it is $07
+  $70BA        3x3 explosion around the cell below
+  $70FA        3x3 explosion around the current cell
+  $714C/$7159  Test the 4 neighbours for tiles $38-$3A
+  $7172        Firefly: explode on contact ($89=$1C), else turn left,
+               else go straight, else turn right on the spot
+  $7245        Butterfly: explode on contact ($89=$21), else turn right,
+               else go straight, else turn left on the spot
+  $71FD        Rounded-tile test: $10, $14, $02
+  $7214        Tile below is a butterfly ($89=$21) or a firefly ($89=$1C)
+  $7368        Amoeba (growth, too-big -> boulders, suffocated -> diamonds)
+  $75A9/$75CE  Player move-and-dig / direction dispatch
+  $762C        Player handler
+  $766B        Explosion stage step using $764F
+  $7745        Falling boulder, including magic wall $03 and crushing
+  $7A65        Set cave pointer $32/$33 = $084F
+  $813B        Once-per-pass amoeba bookkeeping ($42/$43 -> $8C)
+  $8171-$81D5  Cave scan loop (every cell, every pass)
+  $8274        Clears $42 $43 $96 $97 $8D $8E $8F $90
+  $82F1+       Cave start: $8C=1, $95=4 (or 6), $9A=$7F
+  $8518        Cave decoder (object list at $2420)
+  $8A0C        Raster IRQ
+  $8C92        Play loop: JSR $8171 until $97 != 0
+  $8F14        Top-level game loop
+
+
+ZERO PAGE (confirmed)
+---------------------
+  $02      Scan row limit ($16; $0F when $5D >= $11)
+  $32/$33  Cave pointer
+  $34-$37  Character buffer pointers
+  $38/$39  Handler jump vector
+  $42/$43  Amoeba "can grow" this pass / last pass
+  $44/$45  Player column / row
+  $54-$5B  Raster split settings
+  $89      Explosion type ($1C firefly, $21 butterfly)
+  $8A      Last tile written by $704E
+  $8B      Joystick direction
+  $8C      Amoeba alive (0 = suffocated -> diamonds)
+  $8D      Magic wall active
+  $91/$92  Scan column / row
+  $97      Cave finished (ends the play loop)
+  $9A      Amoeba growth mask ($7F slow = 1/32, $0F fast = 1/4)
+  $A7      IRQ phase
+  $AF      Amoeba timer (compared with $2401)
+  $B7      Player move succeeded
+  $B9      Flash toggle ($76DC)
+
+
+AMOEBA / EXPLOSION RULES
+------------------------
+  Amoeba: count >= 200 ($C8) -> every tile becomes boulder ($11);
+          $8C = 0 -> every tile becomes diamond ($14);
+          growth: rnd & $9A < 4 picks a neighbour; $00/$01 -> $3B.
+  Suffocation: at $813B, if $42 = 0 and $43 != 0, then $8C = 0.
+  Explosion stages ($764F):
+    firefly   $1B->$1C->$1D->$1E->$1F->$00
+    butterfly $20->$21->$22->$23->$24->$14 (diamond)
+    $25->$26->$27->$28->$38
+  $70FA writes $89 to the cells the scan has already passed (Y = 00, 01,
+  02, 28) and the centre; then DEC $89 for the cells still ahead
+  (2A, 50, 51, 52), so all 9 stay in step.
