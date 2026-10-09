@@ -77,6 +77,18 @@ Speech is pictogram words. A mouth click (`$4948`; screen hotspot x=144..175, y=
 
 File 0 serves planet indices 0–3. Small Yoko (index 0, called BOW-BOW) accepts BLOOD, then a help trigger such as PLANET. Away from home he reveals home index 12, (140, 33) in this save. The planet-1 claimant's password is RENDEZ-VOUS 6 7, which reveals duplicate home index 60. Maxon's last stage accepts YOKO NOT DEAD IDEA 3 4 9 and reveals home indices 1 and 61. The ship-menu path `$0A76` calls removal at `$47E5`; alien index 60 or 61 in `$EA` increments `$FD`, and `$FD = 2` enters the end sequence at `$0A94`. Transport button sequences and the other alien files are still open. The planet-12 clue leads to file 3, which this reference does not contain.
 
+Later notes (2026-10-09) cover the tape alien files the reference left open. They are not a replacement for it: claims there are tagged `[V]` / `[I]` / `[?]`, and the disk `PA`–`PP` files are a different layout, so they were not used as a substitute.
+
+`captain_blood_alien_files_format.md` is the storage and interpreter note for the running tape version. Alien file number is planet index >> 2 (`$DA`, set by `$4D99`); one file serves four planets, split inside the script by flags F1–F4. Tape descriptors at `$5120` load banks `P1` and `P2` (and `B4`) at `$5C00`. `$0B1C` then scatters the 9400-byte bank into `$5A00`–`$5BFF`, `$8100`–`$8C3F`, and `$C700`–`$DFFF` (the last is RAM under I/O, so `landed_blood.bin` does not hold it; the bank was cut from `blood_run2_ram.bin`). The 13-entry index at `$584C` gives bank, page count, and virtual offset. `$0B71` copies the match to `$6100`. Files 1, 5, 8, and 12 are absent from the index, so those planets have no conversation (`$3E1E` falls through to `$3DCF`). A file is a header, a 3-plane operand bitmap, a script of PATTERN (`$00`) / ACTION (`$40`) / CONDITION (`$80`) records, and a compressed face unpacked by `$173D`. Take-aboard, put-down, and remove are `$47C1`, `$479F`, and `$47E5`. Removing planet 60 or 61 increments `$FD`; `$FD = 2` loads bank `P2` at `$0A94`. Only the five P1 files are decoded. P2 (files 6, 7, 9–11, 13, 14, and a second file 15) is not in RAM until that switch. `BLOOD CPT` at `$5120` is still unread.
+
+`captain_blood_alien_files/00_index.md` is the shared conventions (planet names, presence flags `Pn+k`, encounter flags F1–F29, story flags from F420) and the P1 chain across the five decoded files. The per-file notes are walkthroughs of those scripts, with coordinates from games A and B:
+
+- `alien_file_00.md` — planets 0–3: Small Yoko, No-No, Maxon. Same quests as the validated reference. An earlier file-0 write-up that called planets 60/61 a win is corrected here.
+- `alien_file_02.md` — planets 8–11: Migrax (Great Bounty, Missile Brave). P10 and P11 are small talk only. One scientist answer points at P16, not Maxon.
+- `alien_file_03.md` — planets 12–15: Croolis-Ulv (Dead Genetic, Great Destroy, Howdy Prison, Insult 4). The planet-12 snapshot `lamded planet 2.vsf` has this file at `$6100`.
+- `alien_file_04.md` — planets 16–19: Croolis-Var (Good Nonsense, Male Warrior, Bad Crazy, Poor Genetic). These are the four planets file 3 asks to destroy.
+- `alien_file_15.md` — planets 60–63: duplicates 1–4. Every message sets F5; `$47E5` then adds 60 minutes. Duplicate 1 gives P2-bank positions; after duplicates 2–4 are gone, P60 points at Torka on P27.
+
 ## Files
 
 | File | Game | What it is |
@@ -94,3 +106,10 @@ File 0 serves planet indices 0–3. Small Yoko (index 0, called BOW-BOW) accepts
 | `bubblebobble_print_levels.py` | Bubble Bobble | Short dump tool: hex of one level plus an ASCII bitmask. |
 | `bubblebobble_print_levels_2.py` | Bubble Bobble | Longer dump tool. The notes are embedded as a docstring, then a renderer that applies the mirror. |
 | `captain_blood_validated_reference.txt` | Captain Blood | Validated memory map, conversation interpreter, and alien-file-0 quests and coordinate replies. |
+| `captain_blood_alien_files_format.md` | Captain Blood | Tape-bank storage, `$584C` index, file layout, and the conversation interpreter. P2 and `BLOOD CPT` still open. |
+| `captain_blood_alien_files/00_index.md` | Captain Blood | Coverage, flag conventions, planet names, and the P1 story chain across the decoded files. |
+| `captain_blood_alien_files/alien_file_00.md` | Captain Blood | File 0 walkthrough: planets 0–3 (Small Yoko, No-No, Maxon). |
+| `captain_blood_alien_files/alien_file_02.md` | Captain Blood | File 2 walkthrough: planets 8–11 (Migrax). P10 and P11 are small talk only. |
+| `captain_blood_alien_files/alien_file_03.md` | Captain Blood | File 3 walkthrough: planets 12–15 (Croolis-Ulv). Loaded at `$6100` in the planet-12 snapshot. |
+| `captain_blood_alien_files/alien_file_04.md` | Captain Blood | File 4 walkthrough: planets 16–19 (Croolis-Var). |
+| `captain_blood_alien_files/alien_file_15.md` | Captain Blood | File 15 walkthrough: planets 60–63 (duplicates). F5 marks the +60 minute absorb. |
